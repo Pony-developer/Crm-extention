@@ -1,4 +1,4 @@
-import type { ComponentSearchResult } from '../shared/types';
+import type { ComponentSearchResult, PageBridgeRequest, PageBridgeResponse } from '../shared/types';
 
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
 export default defineContentScript({
@@ -6,84 +6,66 @@ export default defineContentScript({
   allFrames: true,
   world: 'MAIN',
   main() {
-    const CHANNEL = 'dynamics-toolkit';
+    const CHANNEL = 'dynamics-toolkit' as const;
     const CACHE_TTL = 24 * 60 * 60 * 1000;
+    const ACTIONS = new Set(['handshake', 'context', 'fields', 'request', 'cancelRequest', 'searchComponents', 'openComponent']);
+    const usedRequestIds = new Set<string>();
+    const requests = new Map<string, AbortController>();
+    let sessionToken: string | undefined;
+    let subscriptionKey = '';
+    let unsubscribe: (() => void) | undefined;
     const xrm = () => (window as typeof window & { Xrm?: any }).Xrm;
     const guid = (value?: string) => value?.replace(/[{}]/g, '').toLowerCase();
     const odataString = (value: string) => value.replace(/'/g, "''");
+    const post = (response: PageBridgeResponse) => window.postMessage(response, window.location.origin);
+    const fail = (id: string, action: PageBridgeResponse['action'], error: string, token?: string) => post({ channel: CHANNEL, direction: 'response', id, action, token, error });
 
     async function getCollection(path: string) {
       const response = await fetch(path, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
       if (!response.ok) throw new Error(`Dataverse search failed (${response.status} ${response.statusText})`);
       return (await response.json()).value as any[];
     }
-
-    const postEvent = (event: string, payload?: unknown) =>
-      window.postMessage({ channel: CHANNEL, direction: 'event', event, payload }, '*');
-
-    function fieldState(attribute: any) {
-      return {
-        name: attribute.getName(),
-        dirty: Boolean(attribute.getIsDirty?.()),
-        value: attribute.getValue?.(),
-      };
-    }
-
+    const postEvent = (event: string, payload?: unknown) => window.postMessage({ channel: CHANNEL, direction: 'event', event, payload }, window.location.origin);
+    function fieldState(attribute: any) { return { name: attribute.getName(), dirty: Boolean(attribute.getIsDirty?.()), value: attribute.getValue?.() }; }
     function subscribe(page: any) {
-      const entity = page?.data?.entity;
-      const key = `${entity?.getEntityName?.() ?? ''}:${guid(entity?.getId?.()) ?? ''}`;
-      if (!entity || key === subscriptionKey) return;
-      unsubscribe?.();
-      subscriptionKey = key;
-      const removers: Array<() => void> = [];
-      entity.attributes?.forEach((attribute: any) => {
-        const handler = () => postEvent('attribute-change', fieldState(attribute));
-        attribute.addOnChange?.(handler);
-        removers.push(() => attribute.removeOnChange?.(handler));
-      });
-      const publishAll = (reason: string) => {
-        const fields: unknown[] = [];
-        entity.attributes?.forEach((attribute: any) => fields.push(fieldState(attribute)));
-        postEvent('fields-state', { reason, fields });
-      };
-      const onSave = (eventContext: any) => {
-        postEvent('form-save', { saveMode: eventContext.getEventArgs?.()?.getSaveMode?.() });
-        // Autosave clears dirty flags asynchronously. The post-save hook is preferred;
-        // this fallback also supports older UCI clients that do not expose it.
-        window.setTimeout(() => publishAll('save-complete'), 750);
-      };
-      const onPostSave = () => publishAll('save-complete');
-      const onLoad = () => publishAll('form-load');
-      entity.addOnSave?.(onSave);
-      entity.addOnPostSave?.(onPostSave);
-      page.data?.addOnLoad?.(onLoad);
-      removers.push(
-        () => entity.removeOnSave?.(onSave),
-        () => entity.removeOnPostSave?.(onPostSave),
-        () => page.data?.removeOnLoad?.(onLoad),
-      );
+      const entity = page?.data?.entity; const key = `${entity?.getEntityName?.() ?? ''}:${guid(entity?.getId?.()) ?? ''}`;
+      if (!entity || key === subscriptionKey) return; unsubscribe?.(); subscriptionKey = key; const removers: Array<() => void> = [];
+      entity.attributes?.forEach((attribute: any) => { const handler = () => postEvent('attribute-change', fieldState(attribute)); attribute.addOnChange?.(handler); removers.push(() => attribute.removeOnChange?.(handler)); });
+      const publishAll = (reason: string) => { const fields: unknown[] = []; entity.attributes?.forEach((attribute: any) => fields.push(fieldState(attribute))); postEvent('fields-state', { reason, fields }); };
+      const onSave = () => window.setTimeout(() => publishAll('save-complete'), 750); const onPostSave = () => publishAll('save-complete'); const onLoad = () => publishAll('form-load');
+      entity.addOnSave?.(onSave); entity.addOnPostSave?.(onPostSave); page.data?.addOnLoad?.(onLoad);
+      removers.push(() => entity.removeOnSave?.(onSave), () => entity.removeOnPostSave?.(onPostSave), () => page.data?.removeOnLoad?.(onLoad));
       unsubscribe = () => { removers.splice(0).forEach(remove => remove()); subscriptionKey = ''; };
     }
-
     async function getMetadata(orgUrl: string, logicalName: string) {
       const cacheKey = `dynamics-toolkit:metadata:${orgUrl}:${logicalName}`;
-      try {
-        const cached = JSON.parse(localStorage.getItem(cacheKey) ?? 'null');
-        if (cached?.savedAt > Date.now() - CACHE_TTL && Array.isArray(cached.value)) return cached.value;
-      } catch { /* Invalid or inaccessible cache: fetch a fresh copy. */ }
+      try { const cached = JSON.parse(localStorage.getItem(cacheKey) ?? 'null'); if (cached?.savedAt > Date.now() - CACHE_TTL && Array.isArray(cached.value)) return cached.value; } catch { /* Fetch fresh metadata. */ }
       const url = `${orgUrl}/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(logicalName)}')/Attributes?$select=LogicalName,SchemaName,AttributeType,RequiredLevel`;
-      const response = await fetch(url, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
-      if (!response.ok) return [];
-      const value = (await response.json()).value;
-      try { localStorage.setItem(cacheKey, JSON.stringify({ savedAt: Date.now(), value })); } catch { /* Storage can be disabled. */ }
-      return value;
+      const response = await fetch(url, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } }); if (!response.ok) return [];
+      const value = (await response.json()).value; try { localStorage.setItem(cacheKey, JSON.stringify({ savedAt: Date.now(), value })); } catch { /* Storage may be disabled. */ } return value;
     }
 
-    window.addEventListener('pagehide', () => unsubscribe?.());
-    window.addEventListener('message', async (event) => {
-      if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'request') return;
-      const { id, action, payload } = event.data;
+    const onMessage = async (event: MessageEvent<unknown>) => {
+      if (event.source !== window || event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+      const candidate = event.data as Record<string, any>;
+      if (candidate.channel !== CHANNEL || candidate.direction !== 'request') return;
+      const id = typeof candidate.id === 'string' ? candidate.id : '';
+      const rawAction = typeof candidate.action === 'string' ? candidate.action : 'unknown';
+      const action = ACTIONS.has(rawAction) ? rawAction as PageBridgeRequest['action'] : 'unknown';
+      const suppliedToken = typeof candidate.token === 'string' ? candidate.token : undefined;
+      if (!id) return fail('invalid', action, 'A non-empty request ID is required', suppliedToken);
+      if (usedRequestIds.has(id)) return fail(id, action, 'Request ID has already been used', suppliedToken);
+      usedRequestIds.add(id);
+      if (action === 'unknown') return fail(id, action, `Unknown bridge action: ${rawAction}`, suppliedToken);
+      if (action === 'handshake') {
+        const token = typeof candidate.payload?.token === 'string' ? candidate.payload.token : '';
+        if (token.length < 32 || token.length > 256) return fail(id, action, 'Invalid session token');
+        if (sessionToken) return fail(id, action, 'Bridge session is already initialized');
+        sessionToken = token; post({ channel: CHANNEL, direction: 'response', id, action, token, result: { accepted: true } }); return;
+      }
+      if (!sessionToken || suppliedToken !== sessionToken) return fail(id, action, 'Invalid bridge session token', suppliedToken);
       try {
+        const payload = candidate.payload;
         const Xrm = xrm();
         if (!Xrm?.Utility?.getGlobalContext) throw new Error('Dynamics Xrm API is not available in this frame');
         const page = Xrm.Page;
@@ -130,6 +112,8 @@ export default defineContentScript({
             signal: controller.signal,
           });
           result = { status: response.status, statusText: response.statusText, body: await response.text() };
+        } else if (action === 'cancelRequest') {
+          const controller = requests.get(payload.requestId); controller?.abort(); result = requests.delete(payload.requestId);
         } else if (action === 'searchComponents') {
           const query = String(payload?.query ?? '').trim();
           const limit = Math.min(Math.max(Number(payload?.limit) || 20, 1), 50);
@@ -173,39 +157,16 @@ export default defineContentScript({
           throw new Error(`Unknown page bridge action: ${String(action)}`);
         }
 
-        if (!candidate.payload || typeof candidate.payload !== 'object') throw new Error('Invalid request payload');
-        const payload = candidate.payload as Record<string, unknown>;
-        const method = payload && typeof payload.method === 'string' ? payload.method.toUpperCase() : '';
-        const path = payload && typeof payload.path === 'string' ? payload.path : '';
-        const body = payload && typeof payload.body === 'string' ? payload.body : undefined;
-        if (!METHODS.has(method as DataverseMethod)) throw new Error(`HTTP method is not allowed: ${method || '(missing)'}`);
-        if (!path.startsWith('/api/data/') || path.startsWith('//') || path.includes('\\')) throw new Error('Only relative /api/data/ paths are allowed');
-        const clientUrl = new URL(global.getClientUrl());
-        const requestUrl = new URL(path, `${clientUrl.origin}/`);
-        if (requestUrl.origin !== clientUrl.origin || !requestUrl.pathname.startsWith('/api/data/')) throw new Error('Dataverse URL is outside the current organization');
-        if (body && new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES) throw new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`);
-        if (body && !['POST', 'PATCH', 'PUT'].includes(method)) throw new Error(`${method} requests cannot contain a body`);
-        const response = await fetch(requestUrl, {
-          method,
-          headers: { Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' },
-          body,
-        });
-        post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result: { status: response.status, statusText: response.statusText, body: await response.text() } });
+        if (action === 'request') requests.delete(payload.requestId);
+        post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result } as PageBridgeResponse);
       } catch (error) {
-        if (event.data?.payload?.requestId) requests.delete(event.data.payload.requestId);
-        window.postMessage({ channel: CHANNEL, direction: 'response', id, error: error instanceof Error ? error.message : String(error) }, '*');
+        if (candidate.payload?.requestId && action === 'request') requests.delete(candidate.payload.requestId);
+        fail(id, action, error instanceof Error ? error.message : String(error), sessionToken);
       }
     };
-
     const bridgeWindow = window as typeof window & { __dynamicsToolkitTeardown?: () => void };
     bridgeWindow.__dynamicsToolkitTeardown?.();
-    const teardown = () => {
-      window.removeEventListener('message', onMessage);
-      window.removeEventListener('pagehide', teardown);
-      usedRequestIds.clear();
-      sessionToken = undefined;
-      delete bridgeWindow.__dynamicsToolkitTeardown;
-    };
+    const teardown = () => { window.removeEventListener('message', onMessage); window.removeEventListener('pagehide', teardown); unsubscribe?.(); requests.forEach(controller => controller.abort()); requests.clear(); usedRequestIds.clear(); sessionToken = undefined; delete bridgeWindow.__dynamicsToolkitTeardown; };
     bridgeWindow.__dynamicsToolkitTeardown = teardown;
     window.addEventListener('message', onMessage);
     window.addEventListener('pagehide', teardown, { once: true });
