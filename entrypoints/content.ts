@@ -3,6 +3,18 @@ import type { ComponentSearchResult, CrmContext, ToolMessage } from '../shared/t
 type FieldInfo = { name: string; schema: string; type: string; required: string; dirty: boolean; controlNames: string[] };
 type PageEvent = { channel?: string; direction?: string; event?: string; payload?: any };
 const CHANNEL = 'dynamics-toolkit';
+const THEME_STYLE_ID = 'dynamics-toolkit-theme';
+const CUSTOM_STYLE_ID = 'dynamics-toolkit-custom-css';
+const UCI_THEME_CSS = `
+:root { --dt-page-bg:#111827; --dt-surface-bg:#182235; --dt-surface-raised:#202c40; --dt-border:#39475c; --dt-text:#eef2f7; --dt-text-muted:#b5c0cf; --dt-accent:#a68bfa; color-scheme:dark; }
+body, #ApplicationShell, [data-id="app-shell"], [data-id="page-container"], [data-id="form-container"] { background-color:var(--dt-page-bg)!important; color:var(--dt-text)!important; }
+[role="dialog"], [role="menu"], [role="listbox"], [data-id="command-bar"], [data-id="header-container"], [data-id="tab-section"], [data-id="section-container"], [data-id="grid-container"], .ms-Panel-main, .ms-Callout-main { background-color:var(--dt-surface-bg)!important; color:var(--dt-text)!important; border-color:var(--dt-border)!important; }
+input:not([type="image"]), textarea, select, button, [role="textbox"], [role="combobox"], [role="gridcell"], [role="columnheader"] { color:var(--dt-text)!important; border-color:var(--dt-border)!important; }
+input:not([type="image"]), textarea, select, [role="textbox"], [role="combobox"] { background-color:var(--dt-surface-raised)!important; }
+a, [role="link"] { color:var(--dt-accent)!important; }
+[class*="label"], [class*="Label"], [data-id*="field-label"] { color:var(--dt-text-muted)!important; }
+img, picture, video, canvas, svg, iframe, object, embed, [data-id*="webresource" i], [class*="webresource" i] { color-scheme:normal; }
+`;
 const escapeHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
 function callPage<T>(action: string, payload?: unknown, timeout = 10_000): Promise<T> {
