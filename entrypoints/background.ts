@@ -1,11 +1,17 @@
-import type { CrmContext, ToolMessage } from '../shared/types';
+import type { CrmContext, PerformanceSnapshot, ToolMessage } from '../shared/types';
 
 export default defineBackground(() => {
   const contexts = new Map<number, { frameId: number; context: CrmContext }>();
+  const performance = new Map<number, PerformanceSnapshot>();
 
   browser.runtime.onMessage.addListener((message: ToolMessage, sender) => {
     if (message.type === 'REGISTER_CONTEXT' && sender.tab?.id != null) {
       contexts.set(sender.tab.id, { frameId: sender.frameId ?? 0, context: message.context });
+      return Promise.resolve({ ok: true });
+    }
+    if (message.type === 'REGISTER_PERFORMANCE' && sender.tab?.id != null) {
+      performance.set(sender.tab.id, message.snapshot);
+      void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: message.snapshot } satisfies ToolMessage).catch(() => undefined);
       return Promise.resolve({ ok: true });
     }
     if (message.type === 'GET_ACTIVE_CONTEXT') {
@@ -32,6 +38,9 @@ export default defineBackground(() => {
         return browser.tabs.sendMessage(tab.id, message, { frameId: target.frameId });
       });
     }
+    if (message.type === 'GET_ACTIVE_PERFORMANCE') {
+      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? performance.get(tab.id) : undefined);
+    }
     if (message.type === 'SET_THEME') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
         if (tab?.id == null) return;
@@ -41,7 +50,7 @@ export default defineBackground(() => {
     }
   });
 
-  browser.tabs.onRemoved.addListener(tabId => contexts.delete(tabId));
+  browser.tabs.onRemoved.addListener(tabId => { contexts.delete(tabId); performance.delete(tabId); });
   browser.action.onClicked.addListener(async (tab) => {
     if (tab.windowId) await browser.sidePanel.open({ windowId: tab.windowId });
   });
