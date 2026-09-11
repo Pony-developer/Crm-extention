@@ -1,48 +1,8 @@
-import type { ContextFrame, CrmContext, ToolMessage } from '../shared/types';
-
-type ContextTarget = ContextFrame & { frameId: number };
-type CachedContext = ContextTarget & { context: CrmContext };
-const SESSION_KEY = 'contextFrames';
-
-const isRecordContext = (context: unknown): context is CrmContext =>
-  Boolean(context && typeof context === 'object' && (context as CrmContext).connected && (context as CrmContext).entityName);
-
-const quality = ({ context, role }: CachedContext) =>
-  (context.recordId ? 4 : 0) + (context.formName ? 2 : 0) + (role === 'embedded-entity-form' ? 1 : 0);
+import type { CrmContext, PerformanceSnapshot, ToolMessage } from '../shared/types';
 
 export default defineBackground(() => {
-  const contexts = new Map<number, CachedContext>();
-
-  async function sessionTargets(): Promise<Record<string, ContextTarget>> {
-    const value: Record<string, unknown> = await browser.storage.session.get(SESSION_KEY).catch(() => ({}));
-    return (value[SESSION_KEY] as Record<string, ContextTarget> | undefined) ?? {};
-  }
-
-  async function rememberTarget(tabId: number, target: ContextTarget) {
-    const targets = await sessionTargets();
-    targets[tabId] = target;
-    await browser.storage.session.set({ [SESSION_KEY]: targets }).catch(() => undefined);
-  }
-
-  async function targetFor(tabId: number) {
-    const cached = contexts.get(tabId);
-    if (cached) return cached;
-    return (await sessionTargets())[tabId];
-  }
-
-  async function queryContext(tabId: number): Promise<CrmContext | undefined> {
-    const target = await targetFor(tabId);
-    if (target) {
-      const direct = await browser.tabs.sendMessage(tabId, { type: 'GET_CONTEXT' } satisfies ToolMessage, { frameId: target.frameId }).catch(() => undefined);
-      if (isRecordContext(direct)) return direct;
-    }
-
-    // With no usable frame hint, let the browser ask every injected frame. Only
-    // an entity-form content script answers GET_CONTEXT.
-    const discovered = await browser.tabs.sendMessage(tabId, { type: 'GET_CONTEXT' } satisfies ToolMessage).catch(() => undefined);
-    if (isRecordContext(discovered)) return discovered;
-    return contexts.get(tabId)?.context;
-  }
+  const contexts = new Map<number, { frameId: number; context: CrmContext }>();
+  const performance = new Map<number, PerformanceSnapshot>();
 
   browser.runtime.onMessage.addListener((message: ToolMessage, sender) => {
     if (message.type === 'REGISTER_CONTEXT' && sender.tab?.id != null) {
@@ -58,8 +18,37 @@ export default defineBackground(() => {
       }
       return Promise.resolve({ ok: true });
     }
+    if (message.type === 'REGISTER_PERFORMANCE' && sender.tab?.id != null) {
+      performance.set(sender.tab.id, message.snapshot);
+      void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: message.snapshot } satisfies ToolMessage).catch(() => undefined);
+      return Promise.resolve({ ok: true });
+    }
     if (message.type === 'GET_ACTIVE_CONTEXT') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? queryContext(tab.id) : undefined);
+      return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+        if (tab?.id == null) return undefined;
+        const target = contexts.get(tab.id);
+        return browser.tabs.sendMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined)
+          .catch(() => target?.context);
+      });
+    }
+    if (message.type === 'CAPTURE_VISIBLE_TAB') {
+      // captureVisibleTab is deliberately kept in the worker. `activeTab` grants
+      // access only after an explicit user action; no page or field data is read.
+      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (tab?.windowId == null) throw new Error('No active tab to capture');
+        return browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      });
+    }
+    if (message.type === 'RUN_REQUEST' || message.type === 'CANCEL_REQUEST') {
+      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (tab?.id == null) throw new Error('No active Dynamics tab');
+        const target = contexts.get(tab.id);
+        if (!target) throw new Error('Dynamics bridge is not connected to the active tab');
+        return browser.tabs.sendMessage(tab.id, message, { frameId: target.frameId });
+      });
+    }
+    if (message.type === 'GET_ACTIVE_PERFORMANCE') {
+      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? performance.get(tab.id) : undefined);
     }
     if (message.type === 'SET_THEME') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
@@ -70,10 +59,7 @@ export default defineBackground(() => {
     }
   });
 
-  browser.tabs.onRemoved.addListener(tabId => {
-    contexts.delete(tabId);
-    void sessionTargets().then(targets => { delete targets[tabId]; return browser.storage.session.set({ [SESSION_KEY]: targets }); }).catch(() => undefined);
-  });
+  browser.tabs.onRemoved.addListener(tabId => { contexts.delete(tabId); performance.delete(tabId); });
   browser.action.onClicked.addListener(async (tab) => {
     if (tab.windowId) await browser.sidePanel.open({ windowId: tab.windowId });
   });

@@ -6,7 +6,7 @@ export default defineConfig({
   manifest: {
     name: 'Dynamics Toolkit',
     description: 'Developer and support tools for Microsoft Dynamics 365.',
-    permissions: ['storage', 'activeTab', 'scripting', 'tabs', 'sidePanel'],
+    permissions: ['storage', 'activeTab', 'tabs', 'sidePanel'],
     host_permissions: ['https://*.dynamics.com/*'],
     action: { default_title: 'Dynamics Toolkit' },
     side_panel: { default_path: 'popup.html' },
