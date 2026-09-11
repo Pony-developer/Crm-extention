@@ -50,6 +50,7 @@ export interface CrmContext {
   recordId?: string;
   recordName?: string;
   formName?: string;
+  formId?: string;
   formType?: number;
   appId?: string;
   appUniqueName?: string;
