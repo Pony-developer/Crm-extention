@@ -1,4 +1,4 @@
-import type { CrmContext, ToolMessage } from '../shared/types';
+import type { ContextFrame, CrmContext, ToolMessage } from '../shared/types';
 
 type FieldInfo = { name: string; schema: string; type: string; required: string; dirty: boolean };
 const CHANNEL = 'dynamics-toolkit';
@@ -39,15 +39,45 @@ function installUi(context: CrmContext, fields: FieldInfo[]) {
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'], allFrames: true,
   async main() {
-    let context: CrmContext;
-    try { context = await callPage<CrmContext>('context'); } catch { return; }
+    let context: CrmContext | undefined;
+    let contextSignature = '';
+    const frameRole: ContextFrame['role'] = window.top === window ? 'top-level-entity-form' : 'embedded-entity-form';
+
+    const refreshContext = async () => {
+      const next = await callPage<CrmContext>('context').catch(() => undefined);
+      // Shells can expose the global Xrm object but do not own an entity form.
+      if (!next?.connected || !next.entityName || next.formType == null) {
+        context = undefined;
+        contextSignature = '';
+        return false;
+      }
+      const signature = JSON.stringify([location.href, next.entityName, next.recordId, next.formName, next.formType]);
+      context = next;
+      if (signature !== contextSignature) {
+        contextSignature = signature;
+        await browser.runtime.sendMessage({
+          type: 'REGISTER_CONTEXT',
+          context: next,
+          frame: { url: location.href, role: frameRole, timestamp: Date.now() },
+        } satisfies ToolMessage).catch(() => undefined);
+      }
+      return true;
+    };
+
+    if (!await refreshContext()) return;
     const fields = await callPage<FieldInfo[]>('fields').catch(() => []);
-    const ui = installUi(context, fields);
-    await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
+    const ui = installUi(context!, fields);
     browser.runtime.onMessage.addListener(async (message: ToolMessage) => {
       if (message.type === 'GET_CONTEXT') return context;
       if (message.type === 'OPEN_PALETTE') { ui?.palette.classList.add('open'); (ui?.root.querySelector('input') as HTMLInputElement)?.focus(); }
       if (message.type === 'TOGGLE_THEME') document.documentElement.style.filter = message.enabled ? 'invert(.88) hue-rotate(180deg)' : '';
     });
+
+    // Dynamics changes records without reloading the frame. Polling also covers
+    // platform navigation APIs that do not emit popstate/hashchange.
+    const refresh = () => { void refreshContext(); };
+    window.addEventListener('popstate', refresh);
+    window.addEventListener('hashchange', refresh);
+    window.setInterval(refresh, 1000);
   },
 });
