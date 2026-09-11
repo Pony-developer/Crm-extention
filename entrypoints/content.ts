@@ -2,6 +2,7 @@ import type {
   ComponentSearchResult,
   CrmContext,
   FieldInfo,
+  RelationshipsResult,
   AuthenticatedPageBridgeRequest,
   PageBridgeEvent,
   PageBridgeAction,
@@ -105,6 +106,10 @@ const resultReaders: { [A in BridgeAction]: (response: PageBridgeResponse) => Br
   searchComponents: response => {
     if ('result' in response && response.action === 'searchComponents') return response.result;
     throw new Error('Bridge returned an invalid component search result');
+  },
+  getRelationships: response => {
+    if ('result' in response && response.action === 'getRelationships') return response.result;
+    throw new Error('Bridge returned an invalid relationships result');
   },
   openComponent: response => {
     if ('result' in response && response.action === 'openComponent') return response.result;
@@ -243,6 +248,7 @@ export default defineContentScript({
       if (message.type === 'GET_CONTEXT') return current?.context;
       if (message.type === 'RUN_REQUEST') return bridge.call('request', message.request, 120_000);
       if (message.type === 'CANCEL_REQUEST') return bridge.call('cancelRequest', { requestId: message.requestId });
+      if (message.type === 'GET_RELATIONSHIPS') return bridge.call('getRelationships', message.request, 120_000) satisfies Promise<RelationshipsResult>;
       if (message.type === 'OPEN_PALETTE') { current?.ui.palette.classList.add('open'); current?.ui.root.querySelector<HTMLInputElement>('input')?.focus(); }
       if (message.type === 'TOGGLE_THEME') { themeEnabled = message.enabled; applyAppearance(themeEnabled, customCssEnabled, customCss); }
     };

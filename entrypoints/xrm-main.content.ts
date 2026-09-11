@@ -1,4 +1,4 @@
-import type { ComponentSearchResult, PageBridgeRequest, PageBridgeResponse, WebApiMethod } from '../shared/types';
+import type { ComponentSearchResult, PageBridgeRequest, PageBridgeResponse, RelationshipsError, RelationshipsMetadata, RelationshipsResult, WebApiMethod } from '../shared/types';
 
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
 export default defineContentScript({
@@ -10,7 +10,7 @@ export default defineContentScript({
     const CACHE_TTL = 24 * 60 * 60 * 1000;
     const MAX_BODY_BYTES = 1024 * 1024;
     const METHODS = new Set<WebApiMethod>(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']);
-    const ACTIONS = new Set<PageBridgeRequest['action']>(['handshake', 'context', 'fields', 'request', 'cancelRequest', 'searchComponents', 'openComponent']);
+    const ACTIONS = new Set<PageBridgeRequest['action']>(['handshake', 'context', 'fields', 'request', 'cancelRequest', 'searchComponents', 'getRelationships', 'openComponent']);
     const usedRequestIds = new Set<string>();
     const requests = new Map<string, AbortController>();
     let sessionToken: string | undefined;
@@ -27,6 +27,45 @@ export default defineContentScript({
       const response = await fetch(path, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
       if (!response.ok) throw new Error(`Dataverse search failed (${response.status} ${response.statusText})`);
       return (await response.json()).value as any[];
+    }
+    const relationshipError = (error: unknown): RelationshipsError => {
+      if (error && typeof error === 'object') {
+        const candidate = error as { message?: unknown; status?: unknown };
+        return {
+          message: typeof candidate.message === 'string' && candidate.message ? candidate.message : 'Relationship metadata request failed',
+          ...(typeof candidate.status === 'number' ? { status: candidate.status } : {}),
+        };
+      }
+      return { message: typeof error === 'string' && error ? error : 'Relationship metadata request failed' };
+    };
+    async function getRelationships(logicalName: string): Promise<RelationshipsResult> {
+      if (!logicalName.trim()) return { ok: false, error: { message: 'A non-empty entity logical name is required' } };
+      const root = `/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(logicalName.trim())}')`;
+      const readAll = async <T,>(path: string): Promise<T[]> => {
+        const values: T[] = [];
+        let next: string | undefined = path;
+        while (next) {
+          const response = await fetch(next, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
+          if (!response.ok) {
+            const detail = (await response.text()).slice(0, 500) || response.statusText;
+            throw Object.assign(new Error(detail || 'Relationship metadata request failed'), { status: response.status });
+          }
+          const page = await response.json() as { value?: T[]; '@odata.nextLink'?: string };
+          if (Array.isArray(page.value)) values.push(...page.value);
+          next = page['@odata.nextLink'];
+        }
+        return values;
+      };
+      try {
+        const [oneToMany, manyToOne, manyToMany] = await Promise.all([
+          readAll<RelationshipsMetadata['oneToMany'][number]>(`${root}/OneToManyRelationships?$select=MetadataId,SchemaName,ReferencedEntity,ReferencingEntity`),
+          readAll<RelationshipsMetadata['manyToOne'][number]>(`${root}/ManyToOneRelationships?$select=MetadataId,SchemaName,ReferencedEntity,ReferencingEntity`),
+          readAll<RelationshipsMetadata['manyToMany'][number]>(`${root}/ManyToManyRelationships?$select=MetadataId,SchemaName,Entity1LogicalName,Entity2LogicalName`),
+        ]);
+        return { ok: true, data: { oneToMany, manyToOne, manyToMany } };
+      } catch (error) {
+        return { ok: false, error: relationshipError(error) };
+      }
     }
     const postEvent = (event: string, payload?: unknown) => window.postMessage({ channel: CHANNEL, direction: 'event', event, payload }, window.location.origin);
     function fieldState(attribute: any) { return { name: attribute.getName(), dirty: Boolean(attribute.getIsDirty?.()), value: attribute.getValue?.() }; }
@@ -141,6 +180,9 @@ export default defineContentScript({
           } finally {
             if (requests.get(requestId) === controller) requests.delete(requestId);
           }
+        } else if (action === 'getRelationships') {
+          const result = await getRelationships(typeof payload?.logicalName === 'string' ? payload.logicalName : '');
+          return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
         } else if (action === 'searchComponents') {
           const query = String(payload?.query ?? '').trim();
           const limit = Math.min(Math.max(Number(payload?.limit) || 20, 1), 50);
