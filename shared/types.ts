@@ -11,7 +11,8 @@ export type ToolMessage =
   | { type: 'TOGGLE_THEME'; enabled: boolean }
   | { type: 'SET_THEME'; enabled: boolean }
   | { type: 'CAPTURE_VISIBLE_TAB' }
-  | { type: 'OPEN_PALETTE' };
+  | { type: 'OPEN_PALETTE' }
+  | { type: 'OPEN_COMPONENT'; component: ComponentSearchResult };
 
 /** Metadata used to choose the best Dynamics frame in a tab. `frameId` is
  * intentionally omitted because MessageSender.frameId is authoritative. */

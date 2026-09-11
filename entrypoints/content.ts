@@ -251,6 +251,7 @@ export default defineContentScript({
       if (message.type === 'RUN_REQUEST') return bridge.call('request', message.request, 120_000);
       if (message.type === 'CANCEL_REQUEST') return bridge.call('cancelRequest', { requestId: message.requestId });
       if (message.type === 'GET_RELATIONSHIPS') return bridge.call('getRelationships', message.request, 120_000) satisfies Promise<RelationshipsResult>;
+      if (message.type === 'OPEN_COMPONENT') return bridge.call('openComponent', message.component);
       if (message.type === 'OPEN_PALETTE') { current?.ui.palette.classList.add('open'); current?.ui.root.querySelector<HTMLInputElement>('input')?.focus(); }
       if (message.type === 'TOGGLE_THEME') { themeEnabled = message.enabled; applyTheme(themeEnabled); }
     };
