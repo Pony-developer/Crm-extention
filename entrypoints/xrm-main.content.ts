@@ -1,3 +1,5 @@
+import type { ComponentSearchResult } from '../shared/types';
+
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'],
@@ -7,6 +9,13 @@ export default defineContentScript({
     const CHANNEL = 'dynamics-toolkit';
     const xrm = () => (window as typeof window & { Xrm?: any }).Xrm;
     const guid = (value?: string) => value?.replace(/[{}]/g, '').toLowerCase();
+    const odataString = (value: string) => value.replace(/'/g, "''");
+
+    async function getCollection(path: string) {
+      const response = await fetch(path, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
+      if (!response.ok) throw new Error(`Dataverse search failed (${response.status} ${response.statusText})`);
+      return (await response.json()).value as any[];
+    }
 
     window.addEventListener('message', async (event) => {
       if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'request') return;
@@ -60,6 +69,47 @@ export default defineContentScript({
             body: ['POST', 'PATCH', 'PUT'].includes(payload.method) && payload.body ? payload.body : undefined,
           });
           result = { status: response.status, statusText: response.statusText, body: await response.text() };
+        } else if (action === 'searchComponents') {
+          const query = String(payload?.query ?? '').trim();
+          const limit = Math.min(Math.max(Number(payload?.limit) || 20, 1), 50);
+          if (!query) {
+            result = [];
+          } else {
+            const term = odataString(query);
+            const take = Math.min(limit, 10);
+            const api = '/api/data/v9.2';
+            const filter = (field: string) => encodeURIComponent(`contains(${field},'${term}')`);
+            const [tables, forms, savedViews, personalViews, steps, flows] = await Promise.all([
+              getCollection(`${api}/EntityDefinitions?$select=MetadataId,LogicalName,SchemaName,DisplayName&$filter=${filter('LogicalName')}&$top=${take}`),
+              getCollection(`${api}/systemforms?$select=formid,name,objecttypecode,type&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/savedqueries?$select=savedqueryid,name,returnedtypecode&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/userqueries?$select=userqueryid,name,returnedtypecode&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/sdkmessageprocessingsteps?$select=sdkmessageprocessingstepid,name,stage,mode&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/workflows?$select=workflowid,name,statecode,statuscode&$filter=category%20eq%205%20and%20${filter('name')}&$top=${take}`),
+            ]);
+            const clientUrl = Xrm.Utility.getGlobalContext().getClientUrl();
+            const label = (item: any) => item.DisplayName?.UserLocalizedLabel?.Label || item.SchemaName || item.LogicalName;
+            const matches: ComponentSearchResult[] = [
+              ...tables.map(item => ({ id: guid(item.MetadataId)!, type: 'table' as const, name: label(item), subtitle: item.LogicalName, url: `${clientUrl}/tools/systemcustomization/Entities/EntityEditor.aspx?id=${guid(item.MetadataId)}` })),
+              ...forms.map(item => ({ id: guid(item.formid)!, type: 'form' as const, name: item.name, subtitle: String(item.objecttypecode ?? ''), entityName: 'systemform' })),
+              ...savedViews.map(item => ({ id: guid(item.savedqueryid)!, type: 'view' as const, name: item.name, subtitle: `System view · ${item.returnedtypecode ?? ''}`, entityName: 'savedquery' })),
+              ...personalViews.map(item => ({ id: guid(item.userqueryid)!, type: 'view' as const, name: item.name, subtitle: `Personal view · ${item.returnedtypecode ?? ''}`, entityName: 'userquery' })),
+              ...steps.map(item => ({ id: guid(item.sdkmessageprocessingstepid)!, type: 'plugin-step' as const, name: item.name, subtitle: `Stage ${item.stage} · ${item.mode === 0 ? 'Synchronous' : 'Asynchronous'}`, entityName: 'sdkmessageprocessingstep' })),
+              ...flows.map(item => ({ id: guid(item.workflowid)!, type: 'cloud-flow' as const, name: item.name, subtitle: item.statecode === 1 ? 'Activated' : 'Draft', entityName: 'workflow' })),
+            ];
+            result = matches.slice(0, limit);
+          }
+        } else if (action === 'openComponent') {
+          if (payload?.url) {
+            window.open(payload.url, '_blank', 'noopener');
+          } else if (payload?.entityName && payload?.id) {
+            await Xrm.Navigation.openForm({ entityName: payload.entityName, entityId: guid(payload.id), openInNewWindow: true });
+          } else {
+            throw new Error('This component does not have a valid navigation target');
+          }
+          result = true;
+        } else {
+          throw new Error(`Unknown page bridge action: ${String(action)}`);
         }
         window.postMessage({ channel: CHANNEL, direction: 'response', id, result }, '*');
       } catch (error) {
