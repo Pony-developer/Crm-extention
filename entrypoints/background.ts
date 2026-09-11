@@ -11,6 +11,14 @@ export default defineBackground(() => {
     if (message.type === 'GET_ACTIVE_CONTEXT') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? contexts.get(tab.id)?.context : undefined);
     }
+    if (message.type === 'RUN_REQUEST' || message.type === 'CANCEL_REQUEST') {
+      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (tab?.id == null) throw new Error('No active Dynamics tab');
+        const target = contexts.get(tab.id);
+        if (!target) throw new Error('Dynamics bridge is not connected to the active tab');
+        return browser.tabs.sendMessage(tab.id, message, { frameId: target.frameId });
+      });
+    }
     if (message.type === 'SET_THEME') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
         if (tab?.id == null) return;
