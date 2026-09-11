@@ -7,6 +7,7 @@ export default defineContentScript({
     const CHANNEL = 'dynamics-toolkit';
     const xrm = () => (window as typeof window & { Xrm?: any }).Xrm;
     const guid = (value?: string) => value?.replace(/[{}]/g, '').toLowerCase();
+    const requests = new Map<string, AbortController>();
 
     window.addEventListener('message', async (event) => {
       if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'request') return;
@@ -54,15 +55,27 @@ export default defineContentScript({
             return { ...attribute, schema: item?.SchemaName ?? attribute.name, type: item?.AttributeType ?? attribute.type, required: item?.RequiredLevel?.Value ?? attribute.required };
           });
         } else if (action === 'request') {
+          const controller = new AbortController();
+          requests.set(payload.requestId, controller);
+          const headers = new Headers({ Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' });
+          for (const header of payload.headers ?? []) if (header.name.trim()) headers.set(header.name.trim(), header.value);
+          if (['POST', 'PATCH', 'PUT'].includes(payload.method) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json; charset=utf-8');
           const response = await fetch(payload.path, {
             method: payload.method,
-            headers: { Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' },
+            headers,
             body: ['POST', 'PATCH', 'PUT'].includes(payload.method) && payload.body ? payload.body : undefined,
+            signal: controller.signal,
           });
           result = { status: response.status, statusText: response.statusText, body: await response.text() };
+          requests.delete(payload.requestId);
+        } else if (action === 'cancelRequest') {
+          requests.get(payload.requestId)?.abort();
+          requests.delete(payload.requestId);
+          result = { cancelled: true };
         }
         window.postMessage({ channel: CHANNEL, direction: 'response', id, result }, '*');
       } catch (error) {
+        if (event.data?.payload?.requestId) requests.delete(event.data.payload.requestId);
         window.postMessage({ channel: CHANNEL, direction: 'response', id, error: error instanceof Error ? error.message : String(error) }, '*');
       }
     });
