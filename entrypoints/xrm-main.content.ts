@@ -172,11 +172,42 @@ export default defineContentScript({
         } else {
           throw new Error(`Unknown page bridge action: ${String(action)}`);
         }
-        window.postMessage({ channel: CHANNEL, direction: 'response', id, result }, '*');
+
+        if (!candidate.payload || typeof candidate.payload !== 'object') throw new Error('Invalid request payload');
+        const payload = candidate.payload as Record<string, unknown>;
+        const method = payload && typeof payload.method === 'string' ? payload.method.toUpperCase() : '';
+        const path = payload && typeof payload.path === 'string' ? payload.path : '';
+        const body = payload && typeof payload.body === 'string' ? payload.body : undefined;
+        if (!METHODS.has(method as DataverseMethod)) throw new Error(`HTTP method is not allowed: ${method || '(missing)'}`);
+        if (!path.startsWith('/api/data/') || path.startsWith('//') || path.includes('\\')) throw new Error('Only relative /api/data/ paths are allowed');
+        const clientUrl = new URL(global.getClientUrl());
+        const requestUrl = new URL(path, `${clientUrl.origin}/`);
+        if (requestUrl.origin !== clientUrl.origin || !requestUrl.pathname.startsWith('/api/data/')) throw new Error('Dataverse URL is outside the current organization');
+        if (body && new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES) throw new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`);
+        if (body && !['POST', 'PATCH', 'PUT'].includes(method)) throw new Error(`${method} requests cannot contain a body`);
+        const response = await fetch(requestUrl, {
+          method,
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' },
+          body,
+        });
+        post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result: { status: response.status, statusText: response.statusText, body: await response.text() } });
       } catch (error) {
         if (event.data?.payload?.requestId) requests.delete(event.data.payload.requestId);
         window.postMessage({ channel: CHANNEL, direction: 'response', id, error: error instanceof Error ? error.message : String(error) }, '*');
       }
-    });
+    };
+
+    const bridgeWindow = window as typeof window & { __dynamicsToolkitTeardown?: () => void };
+    bridgeWindow.__dynamicsToolkitTeardown?.();
+    const teardown = () => {
+      window.removeEventListener('message', onMessage);
+      window.removeEventListener('pagehide', teardown);
+      usedRequestIds.clear();
+      sessionToken = undefined;
+      delete bridgeWindow.__dynamicsToolkitTeardown;
+    };
+    bridgeWindow.__dynamicsToolkitTeardown = teardown;
+    window.addEventListener('message', onMessage);
+    window.addEventListener('pagehide', teardown, { once: true });
   },
 });

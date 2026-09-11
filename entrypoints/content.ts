@@ -29,6 +29,29 @@ function callPage<T>(action: string, payload?: unknown, timeout = 10_000): Promi
     window.addEventListener('message', receive);
     window.postMessage({ channel: CHANNEL, direction: 'request', id, action, payload }, '*');
   });
+
+  return {
+    async handshake() {
+      const response = await send({ channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action: 'handshake', payload: { token } });
+      if ('error' in response) throw new Error(response.error);
+      if (response.action !== 'handshake' || response.token !== token || !response.result.accepted) throw new Error('Invalid bridge handshake response');
+    },
+    async call<A extends keyof BridgeResults>(action: A, payload: BridgePayloads[A]): Promise<BridgeResults[A]> {
+      const request = { channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action, token, payload } as BridgeRequest;
+      const response = await send(request);
+      if ('error' in response) throw new Error(response.error);
+      if (response.action !== action) throw new Error('Bridge returned a mismatched action');
+      return response.result as BridgeResults[A];
+    },
+    teardown() {
+      window.removeEventListener('message', receive);
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error('Dynamics page bridge was torn down'));
+      }
+      pending.clear();
+    },
+  };
 }
 
 function installUi(context: CrmContext, initialFields: FieldInfo[]) {
@@ -130,8 +153,14 @@ export default defineContentScript({
     };
     window.addEventListener('message', receivePerformance);
     let context: CrmContext;
-    try { context = await callPage<CrmContext>('context'); } catch { return; }
-    const fields = await callPage<FieldInfo[]>('fields').catch(() => []);
+    try {
+      await bridge.handshake();
+      context = await bridge.call('context', null);
+    } catch {
+      bridge.teardown();
+      return;
+    }
+    const fields = await bridge.call('fields', null).catch(() => []);
     const ui = installUi(context, fields);
     window.addEventListener('message', event => {
       if (event.source === window && event.data?.channel === CHANNEL && event.data?.direction === 'event' && event.data?.action === 'fieldsChanged') ui?.applyFields(event.data.result ?? []);
