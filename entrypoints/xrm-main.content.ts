@@ -19,6 +19,7 @@ export default defineContentScript({
         if (action === 'context') {
           const entity = page?.data?.entity;
           const global = Xrm.Utility.getGlobalContext();
+          const app = await global.getCurrentAppProperties?.().catch(() => undefined);
           result = {
             connected: true,
             orgUrl: global.getClientUrl(),
@@ -28,6 +29,8 @@ export default defineContentScript({
             recordName: entity?.getPrimaryAttributeValue(),
             formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(),
             formType: page?.ui?.getFormType(),
+            appId: app?.appId,
+            appUniqueName: app?.uniqueName,
           };
         } else if (action === 'fields') {
           const liveAttributes: any[] = [];

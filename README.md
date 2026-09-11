@@ -8,10 +8,12 @@ Chrome extension for Microsoft Dynamics 365 consultants, developers, and support
 - Web API console that executes authenticated requests in the current Dynamics tab.
 - Field metadata tooltip (schema name, attribute type, required level) and dirty-field highlighting.
 - Developer command palette overlay and a Dynamics UI theme toggle.
-- Live plugin trace log retrieval and saved environment switching with record context preservation.
+- Live plugin trace log retrieval and saved Dev/Test/Prod environment management.
+- Environment switching that resolves entity-set metadata, verifies the target record, handles target-org
+  sign-in, and preserves record and model-driven app context when possible.
 - Side-panel shells for performance, relationships, and repro recording.
 
-> Component search, validation that a record exists in a target org, performance instrumentation,
+> Component search, performance instrumentation,
 > relationship metadata graphing, and screenshot/annotation capture are represented in the UI but are
 > roadmap items. They are deliberately not described as production-ready functionality.
 

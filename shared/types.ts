@@ -17,6 +17,8 @@ export interface CrmContext {
   recordName?: string;
   formName?: string;
   formType?: number;
+  appId?: string;
+  appUniqueName?: string;
 }
 
 export interface SavedEnvironment { id: string; name: string; url: string; kind: 'Dev' | 'Test' | 'Prod'; color: string; }
