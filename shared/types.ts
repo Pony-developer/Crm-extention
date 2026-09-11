@@ -1,14 +1,23 @@
 export type ToolMessage =
   | { type: 'GET_CONTEXT' }
-  | { type: 'REGISTER_CONTEXT'; context: CrmContext }
+  | { type: 'REGISTER_CONTEXT'; context: CrmContext; frame: FrameRegistration }
   | { type: 'REGISTER_PERFORMANCE'; snapshot: PerformanceSnapshot }
   | { type: 'GET_ACTIVE_CONTEXT' }
+  | { type: 'GET_ACTIVE_PERFORMANCE' }
   | { type: 'RUN_REQUEST'; request: WebApiRequest }
   | { type: 'CANCEL_REQUEST'; requestId: string }
   | { type: 'TOGGLE_THEME'; enabled: boolean }
   | { type: 'SET_THEME'; enabled: boolean }
   | { type: 'CAPTURE_VISIBLE_TAB' }
   | { type: 'OPEN_PALETTE' };
+
+/** Metadata used to choose the best Dynamics frame in a tab. `frameId` is
+ * intentionally omitted because MessageSender.frameId is authoritative. */
+export interface FrameRegistration {
+  role: 'record';
+  quality: number;
+  timestamp: number;
+}
 
 export interface PerformanceResource {
   name: string;
