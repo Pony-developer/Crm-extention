@@ -6,7 +6,16 @@ export default defineBackground(() => {
 
   browser.runtime.onMessage.addListener((message: ToolMessage, sender) => {
     if (message.type === 'REGISTER_CONTEXT' && sender.tab?.id != null) {
-      contexts.set(sender.tab.id, { frameId: sender.frameId ?? 0, context: message.context });
+      if (!isRecordContext(message.context)) return Promise.resolve({ ok: false });
+      const tabId = sender.tab.id;
+      const incoming: CachedContext = { frameId: sender.frameId ?? 0, ...message.frame, context: message.context };
+      const current = contexts.get(tabId);
+      // Navigation in the registered frame always wins. Another (possibly late)
+      // iframe may replace it only when it carries a more complete form context.
+      if (!current || (current.frameId === incoming.frameId && incoming.timestamp >= current.timestamp) || quality(incoming) > quality(current)) {
+        contexts.set(tabId, incoming);
+        void rememberTarget(tabId, incoming);
+      }
       return Promise.resolve({ ok: true });
     }
     if (message.type === 'REGISTER_PERFORMANCE' && sender.tab?.id != null) {
@@ -42,9 +51,9 @@ export default defineBackground(() => {
       return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? performance.get(tab.id) : undefined);
     }
     if (message.type === 'SET_THEME') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
         if (tab?.id == null) return;
-        const target = contexts.get(tab.id);
+        const target = await targetFor(tab.id);
         return browser.tabs.sendMessage(tab.id, { type: 'TOGGLE_THEME', enabled: message.enabled } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined);
       });
     }
@@ -58,7 +67,7 @@ export default defineBackground(() => {
     if (command !== 'open-command-palette') return;
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
-      const target = contexts.get(tab.id);
+      const target = await targetFor(tab.id);
       await browser.tabs.sendMessage(tab.id, { type: 'OPEN_PALETTE' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined).catch(() => undefined);
     }
   });
