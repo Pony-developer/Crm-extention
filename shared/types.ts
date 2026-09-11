@@ -18,6 +18,8 @@ export interface CrmContext {
   recordName?: string;
   formName?: string;
   formType?: number;
+  appId?: string;
+  appUniqueName?: string;
 }
 
 export type ComponentType = 'table' | 'form' | 'view' | 'plugin-step' | 'cloud-flow';
