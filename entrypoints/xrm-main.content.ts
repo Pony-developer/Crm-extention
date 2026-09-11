@@ -92,16 +92,7 @@ export default defineContentScript({
         let result: unknown;
         if (action === 'context') {
           const global = Xrm.Utility.getGlobalContext();
-          result = {
-            connected: true,
-            orgUrl: global.getClientUrl(),
-            orgName: global.organizationSettings?.uniqueName,
-            entityName: entity?.getEntityName(),
-            recordId: guid(entity?.getId()),
-            recordName: entity?.getPrimaryAttributeValue(),
-            formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(),
-            formType: page?.ui?.getFormType(),
-          };
+          result = { connected: true, orgUrl: global.getClientUrl(), orgName: global.organizationSettings?.uniqueName, entityName: entity?.getEntityName(), recordId: guid(entity?.getId()), recordName: entity?.getPrimaryAttributeValue(), formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(), formType: page?.ui?.getFormType() };
         } else if (action === 'fields') {
           const controlsByAttribute = new Map<string, string[]>();
           page?.ui?.controls?.forEach((control: any) => {

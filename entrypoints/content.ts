@@ -5,7 +5,7 @@ type PageEvent = { channel?: string; direction?: string; event?: string; payload
 const CHANNEL = 'dynamics-toolkit';
 const escapeHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
-function callPage<T>(action: string, payload?: unknown, timeout = 1500): Promise<T> {
+function callPage<T>(action: string, payload?: unknown, timeout = 10_000): Promise<T> {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { window.removeEventListener('message', receive); reject(new Error('Dynamics page bridge timed out')); }, timeout);
@@ -116,6 +116,9 @@ export default defineContentScript({
     try { context = await callPage<CrmContext>('context'); } catch { return; }
     const fields = await callPage<FieldInfo[]>('fields').catch(() => []);
     const ui = installUi(context, fields);
+    window.addEventListener('message', event => {
+      if (event.source === window && event.data?.channel === CHANNEL && event.data?.direction === 'event' && event.data?.action === 'fieldsChanged') ui?.applyFields(event.data.result ?? []);
+    });
     await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
     browser.runtime.onMessage.addListener(async (message: ToolMessage) => {
       if (message.type === 'GET_CONTEXT') return context;
