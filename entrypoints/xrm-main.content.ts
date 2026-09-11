@@ -1,3 +1,5 @@
+import { installPerformanceMonitor } from '../shared/performance';
+
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'],
@@ -7,6 +9,19 @@ export default defineContentScript({
     const CHANNEL = 'dynamics-toolkit';
     const xrm = () => (window as typeof window & { Xrm?: any }).Xrm;
     const guid = (value?: string) => value?.replace(/[{}]/g, '').toLowerCase();
+    let performanceInstalled = false;
+
+    const installMonitor = () => {
+      const page = xrm()?.Page;
+      if (!page || performanceInstalled) return false;
+      performanceInstalled = true;
+      installPerformanceMonitor(page, snapshot => window.postMessage({ channel: CHANNEL, direction: 'performance', snapshot }, '*'));
+      return true;
+    };
+    if (!installMonitor()) {
+      const timer = window.setInterval(() => { if (installMonitor()) window.clearInterval(timer); }, 100);
+      window.setTimeout(() => window.clearInterval(timer), 30_000);
+    }
 
     window.addEventListener('message', async (event) => {
       if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'request') return;

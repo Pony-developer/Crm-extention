@@ -1,4 +1,4 @@
-import type { CrmContext, ToolMessage } from '../shared/types';
+import type { CrmContext, PerformanceSnapshot, ToolMessage } from '../shared/types';
 
 type FieldInfo = { name: string; schema: string; type: string; required: string; dirty: boolean };
 const CHANNEL = 'dynamics-toolkit';
@@ -39,6 +39,11 @@ function installUi(context: CrmContext, fields: FieldInfo[]) {
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'], allFrames: true,
   async main() {
+    const receivePerformance = (event: MessageEvent) => {
+      if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'performance') return;
+      void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: event.data.snapshot as PerformanceSnapshot } satisfies ToolMessage).catch(() => undefined);
+    };
+    window.addEventListener('message', receivePerformance);
     let context: CrmContext;
     try { context = await callPage<CrmContext>('context'); } catch { return; }
     const fields = await callPage<FieldInfo[]>('fields').catch(() => []);
