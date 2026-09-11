@@ -1,21 +1,61 @@
-import type { CrmContext, ToolMessage } from '../shared/types';
+import type { BridgeRequest, BridgeResponse, CrmContext, DataverseResponse, FieldInfo, ToolMessage } from '../shared/types';
 
-type FieldInfo = { name: string; schema: string; type: string; required: string; dirty: boolean };
-const CHANNEL = 'dynamics-toolkit';
+const CHANNEL = 'dynamics-toolkit' as const;
 const escapeHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
-function callPage<T>(action: string, payload?: unknown, timeout = 1500): Promise<T> {
-  const id = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { window.removeEventListener('message', receive); reject(new Error('Dynamics page bridge timed out')); }, timeout);
-    function receive(event: MessageEvent) {
-      if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'response' || event.data.id !== id) return;
-      clearTimeout(timer); window.removeEventListener('message', receive);
-      event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.result);
-    }
-    window.addEventListener('message', receive);
-    window.postMessage({ channel: CHANNEL, direction: 'request', id, action, payload }, '*');
+type BridgeResults = { context: CrmContext; fields: FieldInfo[]; request: DataverseResponse };
+type BridgePayloads = {
+  context: null;
+  fields: null;
+  request: Extract<BridgeRequest, { action: 'request' }>['payload'];
+};
+
+function createBridge(token: string) {
+  const pending = new Map<string, { resolve(value: BridgeResponse): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
+  const receive = (event: MessageEvent<unknown>) => {
+    if (event.source !== window || event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+    const response = event.data as Partial<BridgeResponse>;
+    if (response.channel !== CHANNEL || response.direction !== 'response' || typeof response.id !== 'string') return;
+    if (response.action !== 'handshake' && response.token !== token) return;
+    const entry = pending.get(response.id);
+    if (!entry) return;
+    pending.delete(response.id);
+    clearTimeout(entry.timer);
+    entry.resolve(response as BridgeResponse);
+  };
+  window.addEventListener('message', receive);
+
+  const send = (request: BridgeRequest, timeout = 1500) => new Promise<BridgeResponse>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(request.id);
+      reject(new Error('Dynamics page bridge timed out'));
+    }, timeout);
+    pending.set(request.id, { resolve, reject, timer });
+    window.postMessage(request, window.location.origin);
   });
+
+  return {
+    async handshake() {
+      const response = await send({ channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action: 'handshake', payload: { token } });
+      if ('error' in response) throw new Error(response.error);
+      if (response.action !== 'handshake' || response.token !== token || !response.result.accepted) throw new Error('Invalid bridge handshake response');
+    },
+    async call<A extends keyof BridgeResults>(action: A, payload: BridgePayloads[A]): Promise<BridgeResults[A]> {
+      const request = { channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action, token, payload } as BridgeRequest;
+      const response = await send(request);
+      if ('error' in response) throw new Error(response.error);
+      if (response.action !== action) throw new Error('Bridge returned a mismatched action');
+      return response.result as BridgeResults[A];
+    },
+    teardown() {
+      window.removeEventListener('message', receive);
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error('Dynamics page bridge was torn down'));
+      }
+      pending.clear();
+    },
+  };
 }
 
 function installUi(context: CrmContext, fields: FieldInfo[]) {
@@ -38,10 +78,20 @@ function installUi(context: CrmContext, fields: FieldInfo[]) {
 
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'], allFrames: true,
-  async main() {
+  async main(ctx) {
+    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = Array.from(tokenBytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    const bridge = createBridge(token);
+    ctx.onInvalidated(() => bridge.teardown());
     let context: CrmContext;
-    try { context = await callPage<CrmContext>('context'); } catch { return; }
-    const fields = await callPage<FieldInfo[]>('fields').catch(() => []);
+    try {
+      await bridge.handshake();
+      context = await bridge.call('context', null);
+    } catch {
+      bridge.teardown();
+      return;
+    }
+    const fields = await bridge.call('fields', null).catch(() => []);
     const ui = installUi(context, fields);
     await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
     browser.runtime.onMessage.addListener(async (message: ToolMessage) => {
