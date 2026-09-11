@@ -188,7 +188,13 @@ export default defineContentScript({
       const fields = await bridge.call('fields', null).catch(() => []);
       if (stopped) return;
       current?.ui.cleanup(); current = { key, context, ui: installUi(context, fields, bridge) };
-      await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
+      const quality = [context.orgUrl, context.entityName, context.recordId, context.formId, context.appId]
+        .filter(value => typeof value === 'string' && value.length > 0).length;
+      await browser.runtime.sendMessage({
+        type: 'REGISTER_CONTEXT',
+        context,
+        frame: { role: 'record', quality, timestamp: Date.now() },
+      } satisfies ToolMessage).catch(() => undefined);
     };
     const onPageEvent = (event: MessageEvent<unknown>) => {
       if (event.source !== window || event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
