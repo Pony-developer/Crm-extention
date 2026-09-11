@@ -1,7 +1,7 @@
 import type { PerformanceSnapshot, PerformanceTask } from '../shared/types';
 
 type DynamicsPage = {
-  data?: { addOnLoad?: (handler: () => void) => void; entity?: { getEntityName?: () => string } };
+  data?: { addOnLoad?: (handler: () => void) => void; removeOnLoad?: (handler: () => void) => void; entity?: { getEntityName?: () => string } };
   ui?: { getFormType?: () => number };
 };
 
@@ -14,7 +14,29 @@ export function installPerformanceMonitor(page: DynamicsPage | undefined, publis
   let formReadyAt: number | undefined;
   let formLoadDuration: number | undefined;
   let formLoadSource: PerformanceSnapshot['formLoadSource'] = 'pending';
-  let timer = 0;
+  const observers: PerformanceObserver[] = [];
+  const timeoutIds = new Set<number>();
+  const intervalIds = new Set<number>();
+  let publishTimeout: number | undefined;
+  let active = true;
+
+  const setMonitorTimeout = (callback: () => void, delay: number) => {
+    const id = window.setTimeout(() => {
+      timeoutIds.delete(id);
+      callback();
+    }, delay);
+    timeoutIds.add(id);
+    return id;
+  };
+  const setMonitorInterval = (callback: () => void, delay: number) => {
+    const id = window.setInterval(callback, delay);
+    intervalIds.add(id);
+    return id;
+  };
+  const clearMonitorInterval = (id: number) => {
+    window.clearInterval(id);
+    intervalIds.delete(id);
+  };
 
   const supported = PerformanceObserver.supportedEntryTypes ?? [];
   const supportsLongTasks = supported.includes('longtask');
@@ -27,12 +49,12 @@ export function installPerformanceMonitor(page: DynamicsPage | undefined, publis
       initiatorType: resource.initiatorType || 'other',
       duration: resource.duration,
       transferSize: resource.transferSize,
-      startTime: resource.startTime,
+      startOffset: resource.startTime,
     }));
     return {
       capturedAt: Date.now(),
-      navigationStart: navigation?.startTime ?? 0,
-      navigationToFormReady: formReadyAt,
+      navigationStartOffset: navigation?.startTime ?? 0,
+      navigationToFormReady: formReadyAt == null ? undefined : formReadyAt - (navigation?.startTime ?? 0),
       formLoadDuration,
       formLoadSource,
       resourceCount: resources.length,
@@ -44,8 +66,15 @@ export function installPerformanceMonitor(page: DynamicsPage | undefined, publis
     };
   };
   const schedulePublish = () => {
-    window.clearTimeout(timer);
-    timer = window.setTimeout(() => publish(snapshot()), 150);
+    if (!active) return;
+    if (publishTimeout !== undefined) {
+      window.clearTimeout(publishTimeout);
+      timeoutIds.delete(publishTimeout);
+    }
+    publishTimeout = setMonitorTimeout(() => {
+      publishTimeout = undefined;
+      if (active) publish(snapshot());
+    }, 150);
   };
 
   const observe = (type: string, target: PerformanceTask[]) => {
@@ -55,7 +84,7 @@ export function installPerformanceMonitor(page: DynamicsPage | undefined, publis
         if (entry.duration < 50) continue;
         const detail = entry as PerformanceEntry & { name?: string; attribution?: Array<{ name?: string; containerName?: string }> };
         target.push({
-          startTime: entry.startTime,
+          startOffset: entry.startTime,
           duration: entry.duration,
           kind: type === 'longtask' ? 'longtask' : 'event',
           attribution: detail.attribution?.map(item => item.containerName || item.name).filter(Boolean).join(', ') || detail.name,
@@ -63,27 +92,44 @@ export function installPerformanceMonitor(page: DynamicsPage | undefined, publis
       }
       schedulePublish();
     });
+    observers.push(observer);
     observer.observe(type === 'event' ? { type, buffered: true, durationThreshold: 50 } as PerformanceObserverInit : { type, buffered: true });
   };
   observe('longtask', longTasks);
   observe('event', eventTasks);
 
   const markReady = (source: PerformanceSnapshot['formLoadSource']) => {
-    if (formReadyAt == null) formReadyAt = performance.now();
+    if (formReadyAt != null) return;
+    formReadyAt = performance.now();
     formLoadSource = source;
-    formLoadDuration = performance.now() - startedAt;
+    formLoadDuration = formReadyAt - startedAt;
     schedulePublish();
   };
-  page?.data?.addOnLoad?.(() => markReady('dynamics-event'));
+  const onDynamicsLoad = () => markReady('dynamics-event');
+  page?.data?.addOnLoad?.(onDynamicsLoad);
 
-  const readiness = window.setInterval(() => {
+  const readiness = setMonitorInterval(() => {
     if (page?.data?.entity?.getEntityName?.() && page?.ui?.getFormType?.() != null) {
-      window.clearInterval(readiness);
+      clearMonitorInterval(readiness);
       markReady('readiness-fallback');
     }
   }, 100);
-  window.setTimeout(() => window.clearInterval(readiness), 30_000);
+  setMonitorTimeout(() => clearMonitorInterval(readiness), 30_000);
   window.addEventListener('load', schedulePublish, { once: true });
-  window.setInterval(schedulePublish, 5_000);
+  setMonitorInterval(schedulePublish, 5_000);
   schedulePublish();
+
+  return () => {
+    if (!active) return;
+    active = false;
+    observers.forEach(observer => observer.disconnect());
+    observers.length = 0;
+    page?.data?.removeOnLoad?.(onDynamicsLoad);
+    timeoutIds.forEach(id => window.clearTimeout(id));
+    timeoutIds.clear();
+    intervalIds.forEach(id => window.clearInterval(id));
+    intervalIds.clear();
+    publishTimeout = undefined;
+    window.removeEventListener('load', schedulePublish);
+  };
 }

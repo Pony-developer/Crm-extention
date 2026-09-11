@@ -27,11 +27,13 @@ export interface PerformanceResource {
   initiatorType: string;
   duration: number;
   transferSize: number;
-  startTime: number;
+  /** Absolute offset from the document's performance time origin. */
+  startOffset: number;
 }
 
 export interface PerformanceTask {
-  startTime: number;
+  /** Absolute offset from the document's performance time origin. */
+  startOffset: number;
   duration: number;
   kind: 'longtask' | 'event';
   /** Browser attribution only; it is not a Dynamics handler identity. */
@@ -40,8 +42,11 @@ export interface PerformanceTask {
 
 export interface PerformanceSnapshot {
   capturedAt: number;
-  navigationStart: number;
+  /** Absolute navigation-start offset from the document's performance time origin. */
+  navigationStartOffset: number;
+  /** Duration between navigation start and the moment the form became ready. */
   navigationToFormReady?: number;
+  /** Duration between monitor installation and the moment the form became ready. */
   formLoadDuration?: number;
   formLoadSource: 'dynamics-event' | 'readiness-fallback' | 'pending';
   resourceCount: number;
