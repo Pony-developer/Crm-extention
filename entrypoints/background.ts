@@ -9,7 +9,20 @@ export default defineBackground(() => {
       return Promise.resolve({ ok: true });
     }
     if (message.type === 'GET_ACTIVE_CONTEXT') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? contexts.get(tab.id)?.context : undefined);
+      return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+        if (tab?.id == null) return undefined;
+        const target = contexts.get(tab.id);
+        return browser.tabs.sendMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined)
+          .catch(() => target?.context);
+      });
+    }
+    if (message.type === 'CAPTURE_VISIBLE_TAB') {
+      // captureVisibleTab is deliberately kept in the worker. `activeTab` grants
+      // access only after an explicit user action; no page or field data is read.
+      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (tab?.windowId == null) throw new Error('No active tab to capture');
+        return browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      });
     }
     if (message.type === 'SET_THEME') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {

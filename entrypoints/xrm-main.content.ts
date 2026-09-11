@@ -21,6 +21,7 @@ export default defineContentScript({
           const global = Xrm.Utility.getGlobalContext();
           result = {
             connected: true,
+            pageUrl: location.href,
             orgUrl: global.getClientUrl(),
             orgName: global.organizationSettings?.uniqueName,
             entityName: entity?.getEntityName(),

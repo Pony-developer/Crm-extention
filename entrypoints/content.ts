@@ -45,7 +45,7 @@ export default defineContentScript({
     const ui = installUi(context, fields);
     await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
     browser.runtime.onMessage.addListener(async (message: ToolMessage) => {
-      if (message.type === 'GET_CONTEXT') return context;
+      if (message.type === 'GET_CONTEXT') return { ...context, pageUrl: location.href };
       if (message.type === 'OPEN_PALETTE') { ui?.palette.classList.add('open'); (ui?.root.querySelector('input') as HTMLInputElement)?.focus(); }
       if (message.type === 'TOGGLE_THEME') document.documentElement.style.filter = message.enabled ? 'invert(.88) hue-rotate(180deg)' : '';
     });
