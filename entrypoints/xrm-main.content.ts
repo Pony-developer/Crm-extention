@@ -87,7 +87,7 @@ export default defineContentScript({
         subscribe(page);
         if (action === 'context') {
           const global = Xrm.Utility.getGlobalContext();
-          const result = { connected: true, orgUrl: global.getClientUrl(), orgName: global.organizationSettings?.uniqueName, entityName: entity?.getEntityName(), recordId: guid(entity?.getId()), recordName: entity?.getPrimaryAttributeValue(), formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(), formType: page?.ui?.getFormType() };
+          const result = { connected: true, orgUrl: global.getClientUrl(), orgName: global.organizationSettings?.uniqueName, entityName: entity?.getEntityName(), recordId: guid(entity?.getId()), recordName: entity?.getPrimaryAttributeValue(), formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(), formType: page?.ui?.getFormType(), pageUrl: window.location.href };
           return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
         } else if (action === 'fields') {
           const controlsByAttribute = new Map<string, string[]>();

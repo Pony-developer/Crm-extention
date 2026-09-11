@@ -2,6 +2,7 @@ export type ToolMessage =
   | { type: 'GET_CONTEXT' }
   | { type: 'REGISTER_CONTEXT'; context: CrmContext; frame: FrameRegistration }
   | { type: 'REGISTER_PERFORMANCE'; snapshot: PerformanceSnapshot }
+  | { type: 'ACTIVE_CONTEXT_CHANGED'; context: CrmContext }
   | { type: 'GET_ACTIVE_CONTEXT' }
   | { type: 'GET_ACTIVE_PERFORMANCE' }
   | { type: 'RUN_REQUEST'; request: WebApiRequest }
@@ -63,6 +64,28 @@ export interface CrmContext {
   formType?: number;
   appId?: string;
   appUniqueName?: string;
+  pageUrl?: string;
+}
+
+export interface Annotation {
+  id: string;
+  kind: 'arrow' | 'rectangle' | 'redact';
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+export type RecordedStepContext = Pick<CrmContext,
+  'pageUrl' | 'orgName' | 'entityName' | 'recordId' | 'formName'>;
+
+export interface RecordedStep {
+  id: string;
+  description: string;
+  timestamp: string;
+  context: RecordedStepContext;
+  screenshot?: string;
+  annotations: Annotation[];
 }
 
 export type ComponentType = 'table' | 'form' | 'view' | 'plugin-step' | 'cloud-flow';
@@ -100,28 +123,65 @@ export interface WebApiRequest {
 }
 export interface WebApiResponse { status: number; statusText: string; body: string; }
 
+export interface HandshakeRequest { token: string; }
+export interface HandshakeResponse { accepted: true; }
+export interface CancelRequest { requestId: string; }
+export interface ComponentSearchRequest { query: string; limit?: number; }
+
+export interface FieldState {
+  name: string;
+  dirty: boolean;
+  value?: unknown;
+}
+
+export interface AttributeChangePayload extends FieldState {}
+export interface FieldsStatePayload { reason: string; fields: FieldState[]; }
+export interface ContextChangedPayload { context: CrmContext; fields: FieldInfo[]; }
+
+export interface PageBridgeActionMap {
+  handshake: { payload: HandshakeRequest; result: HandshakeResponse };
+  context: { payload: null; result: CrmContext };
+  fields: { payload: null; result: FieldInfo[] };
+  request: { payload: WebApiRequest; result: WebApiResponse };
+  cancelRequest: { payload: CancelRequest; result: boolean };
+  searchComponents: { payload: ComponentSearchRequest; result: ComponentSearchResult[] };
+  openComponent: { payload: ComponentSearchResult; result: boolean };
+}
+
+export type PageBridgeAction = keyof PageBridgeActionMap;
+export type PageBridgePayload<A extends PageBridgeAction> = PageBridgeActionMap[A]['payload'];
+export type PageBridgeResult<A extends PageBridgeAction> = PageBridgeActionMap[A]['result'];
+
 interface PageBridgeEnvelope {
   channel: 'dynamics-toolkit';
   id: string;
 }
 
-export type PageBridgeRequest =
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'handshake'; payload: { token: string } })
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'context'; token: string; payload: null })
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'fields'; token: string; payload: null })
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'request'; token: string; payload: WebApiRequest })
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'cancelRequest'; token: string; payload: { requestId: string } })
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'searchComponents'; token: string; payload: { query: string; limit?: number } })
-  | (PageBridgeEnvelope & { direction: 'request'; action: 'openComponent'; token: string; payload: ComponentSearchResult });
+type BridgeRequestBody<A extends PageBridgeAction> = PageBridgeEnvelope & {
+  direction: 'request';
+  action: A;
+  payload: PageBridgePayload<A>;
+};
 
-export type PageBridgeSuccessResponse =
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'handshake'; token: string; result: { accepted: true } })
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'context'; token: string; result: CrmContext })
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'fields'; token: string; result: FieldInfo[] })
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'request'; token: string; result: WebApiResponse })
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'cancelRequest'; token: string; result: boolean })
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'searchComponents'; token: string; result: ComponentSearchResult[] })
-  | (PageBridgeEnvelope & { direction: 'response'; action: 'openComponent'; token: string; result: boolean });
+export type AuthenticatedPageBridgeAction = Exclude<PageBridgeAction, 'handshake'>;
+export type AuthenticatedPageBridgeRequest<A extends AuthenticatedPageBridgeAction> =
+  BridgeRequestBody<A> & { token: string };
+export type PageBridgeRequestFor<A extends PageBridgeAction> = A extends 'handshake'
+  ? BridgeRequestBody<A> & { token?: never }
+  : A extends AuthenticatedPageBridgeAction
+    ? AuthenticatedPageBridgeRequest<A>
+    : never;
+
+/** A correlated, discriminated union generated from the bridge contract. */
+export type PageBridgeRequest = {
+  [A in PageBridgeAction]: PageBridgeRequestFor<A>
+}[PageBridgeAction];
+
+export type PageBridgeSuccessResponse = {
+  [A in PageBridgeAction]: PageBridgeEnvelope & {
+    direction: 'response'; action: A; token: string; result: PageBridgeResult<A>;
+  }
+}[PageBridgeAction];
 
 export type PageBridgeResponse = PageBridgeSuccessResponse | (PageBridgeEnvelope & {
   direction: 'response';
@@ -131,8 +191,15 @@ export type PageBridgeResponse = PageBridgeSuccessResponse | (PageBridgeEnvelope
 });
 
 export type PageBridgeEvent =
-  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'attribute-change'; payload: { name: string; dirty: boolean } }
-  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'fields-state'; payload: { reason: string; fields: Array<{ name: string; dirty: boolean }> } };
+  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'attribute-change'; payload: AttributeChangePayload }
+  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'fields-state'; payload: FieldsStatePayload }
+  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'context-changed'; payload: ContextChangedPayload };
+
+export interface PageBridgePerformanceEvent {
+  channel: 'dynamics-toolkit';
+  direction: 'performance';
+  snapshot: PerformanceSnapshot;
+}
 
 export interface RequestHistoryItem {
   id: string;

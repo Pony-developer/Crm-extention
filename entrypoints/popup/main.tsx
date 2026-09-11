@@ -3,8 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { Activity, Braces, ChevronDown, CircleDot, Clock3, Code2, Command, Copy, Database, ExternalLink, FileSearch, GitFork, Moon, Network, Play, Plus, RefreshCw, Search, Settings, Sparkles, Square, Sun, Terminal, Trash2, Zap } from 'lucide-react';
 import type { CrmContext, RequestHistoryItem, SavedEnvironment, ToolMessage, WebApiHeader, WebApiMethod, WebApiRequest, WebApiResponse } from '../../shared/types';
 import './style.css';
+import { Recorder } from './Recorder';
 
-type View = 'console' | 'traces' | 'tools' | 'settings';
+type View = 'console' | 'traces' | 'tools' | 'settings' | 'recorder';
 type TraceLog = { plugintracelogid: string; typename?: string; messageblock?: string; exceptiondetails?: string; performanceexecutionduration?: number; createdon?: string };
 const tabs = [{id:'console',label:'API Console',icon:Terminal},{id:'traces',label:'Trace Logs',icon:FileSearch},{id:'tools',label:'Tools',icon:Sparkles}] as const;
 const bodyMethods: WebApiMethod[] = ['POST','PATCH','PUT'];
