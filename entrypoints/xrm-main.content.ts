@@ -137,7 +137,28 @@ export default defineContentScript({
         subscribe(page);
         if (action === 'context') {
           const global = Xrm.Utility.getGlobalContext();
-          const result = { connected: true, orgUrl: global.getClientUrl(), orgName: global.organizationSettings?.uniqueName, entityName: entity?.getEntityName(), recordId: guid(entity?.getId()), recordName: entity?.getPrimaryAttributeValue(), formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(), formType: page?.ui?.getFormType(), pageUrl: window.location.href };
+          const entityName = entity?.getEntityName?.();
+          const [app, entityMetadata] = await Promise.all([
+            Promise.resolve(global.getCurrentAppProperties?.()).catch(() => undefined),
+            entityName
+              ? Promise.resolve(Xrm.Utility.getEntityMetadata?.(entityName, ['DisplayName'])).catch(() => undefined)
+              : Promise.resolve(undefined),
+          ]);
+          const result = {
+            connected: true,
+            orgUrl: global.getClientUrl(),
+            orgName: global.organizationSettings?.uniqueName,
+            entityName,
+            entityDisplayName: entityMetadata?.DisplayName?.UserLocalizedLabel?.Label,
+            recordId: guid(entity?.getId?.()),
+            recordName: entity?.getPrimaryAttributeValue?.(),
+            formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel?.(),
+            formId: guid(page?.ui?.formSelector?.getCurrentItem?.()?.getId?.()),
+            formType: page?.ui?.getFormType?.(),
+            appId: guid(app?.appId),
+            appUniqueName: app?.uniqueName,
+            pageUrl: window.location.href,
+          };
           return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
         } else if (action === 'fields') {
           const controlsByAttribute = new Map<string, string[]>();
