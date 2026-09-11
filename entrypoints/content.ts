@@ -2,8 +2,12 @@ import type {
   ComponentSearchResult,
   CrmContext,
   FieldInfo,
+  AuthenticatedPageBridgeRequest,
   PageBridgeEvent,
+  PageBridgeAction,
+  PageBridgePayload,
   PageBridgeRequest,
+  PageBridgeResult,
   PageBridgeResponse,
   PerformanceSnapshot,
   ToolMessage,
@@ -24,9 +28,9 @@ img, picture, video, canvas, svg, iframe, object, embed, [data-id*="webresource"
 `;
 const escapeHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
-type BridgeAction = Exclude<PageBridgeRequest['action'], 'handshake'>;
-type BridgePayload<A extends BridgeAction> = Extract<PageBridgeRequest, { action: A }>['payload'];
-type BridgeResult<A extends BridgeAction> = Extract<PageBridgeResponse, { action: A; result: unknown }>['result'];
+type BridgeAction = Exclude<PageBridgeAction, 'handshake'>;
+type BridgePayload<A extends BridgeAction> = PageBridgePayload<A>;
+type BridgeResult<A extends BridgeAction> = PageBridgeResult<A>;
 type PendingRequest = { resolve(response: PageBridgeResponse): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 
 function createPageBridge(token: string) {
@@ -45,7 +49,7 @@ function createPageBridge(token: string) {
   };
   window.addEventListener('message', receive);
 
-  const send = (request: PageBridgeRequest, timeout: number) => new Promise<PageBridgeResponse>((resolve, reject) => {
+  const send = (request: PageBridgeRequest | AuthenticatedPageBridgeRequest<BridgeAction>, timeout: number) => new Promise<PageBridgeResponse>((resolve, reject) => {
     if (tornDown) return reject(new Error('Dynamics page bridge was torn down'));
     const timer = setTimeout(() => {
       pending.delete(request.id);
@@ -62,11 +66,11 @@ function createPageBridge(token: string) {
       if (response.action !== 'handshake' || response.token !== token || !response.result.accepted) throw new Error('Invalid bridge handshake response');
     },
     async call<A extends BridgeAction>(action: A, payload: BridgePayload<A>, timeout = 10_000): Promise<BridgeResult<A>> {
-      const request = { channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action, token, payload } as PageBridgeRequest;
+      const request: AuthenticatedPageBridgeRequest<A> = { channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action, token, payload };
       const response = await send(request, timeout);
       if ('error' in response) throw new Error(response.error);
       if (response.action !== action) throw new Error('Bridge returned a mismatched action');
-      return response.result as BridgeResult<A>;
+      return bridgeResult(action, response);
     },
     teardown() {
       if (tornDown) return;
@@ -79,6 +83,37 @@ function createPageBridge(token: string) {
       pending.clear();
     },
   };
+}
+
+const resultReaders: { [A in BridgeAction]: (response: PageBridgeResponse) => BridgeResult<A> } = {
+  context: response => {
+    if ('result' in response && response.action === 'context') return response.result;
+    throw new Error('Bridge returned an invalid context result');
+  },
+  fields: response => {
+    if ('result' in response && response.action === 'fields') return response.result;
+    throw new Error('Bridge returned an invalid fields result');
+  },
+  request: response => {
+    if ('result' in response && response.action === 'request') return response.result;
+    throw new Error('Bridge returned an invalid request result');
+  },
+  cancelRequest: response => {
+    if ('result' in response && response.action === 'cancelRequest') return response.result;
+    throw new Error('Bridge returned an invalid cancellation result');
+  },
+  searchComponents: response => {
+    if ('result' in response && response.action === 'searchComponents') return response.result;
+    throw new Error('Bridge returned an invalid component search result');
+  },
+  openComponent: response => {
+    if ('result' in response && response.action === 'openComponent') return response.result;
+    throw new Error('Bridge returned an invalid component navigation result');
+  },
+};
+
+function bridgeResult<A extends BridgeAction>(action: A, response: PageBridgeResponse): BridgeResult<A> {
+  return resultReaders[action](response);
 }
 
 type PageBridge = ReturnType<typeof createPageBridge>;
