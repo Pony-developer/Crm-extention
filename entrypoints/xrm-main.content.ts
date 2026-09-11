@@ -1,3 +1,5 @@
+import type { ComponentSearchResult } from '../shared/types';
+
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'],
@@ -5,165 +7,79 @@ export default defineContentScript({
   world: 'MAIN',
   main() {
     const CHANNEL = 'dynamics-toolkit';
+    const CACHE_TTL = 24 * 60 * 60 * 1000;
     const xrm = () => (window as typeof window & { Xrm?: any }).Xrm;
     const guid = (value?: string) => value?.replace(/[{}]/g, '').toLowerCase();
+    const odataString = (value: string) => value.replace(/'/g, "''");
 
-    type Field = { name: string; schema: string; type: string; required: string; attribute: any };
-    type Difference = Omit<Field, 'attribute'> & { dirty: true; serverValue: unknown; currentValue: unknown };
-    type Snapshot = Map<string, unknown>;
-
-    let fields: Field[] = [];
-    let baseline: Snapshot = new Map();
-    let baselineReady = false;
-    let recordKey = '';
-    let initialization: Promise<void> | undefined;
-    let refreshSequence = 0;
-    const hookedAttributes = new WeakSet<object>();
-    const hookedEntities = new WeakSet<object>();
-    const hookedData = new WeakSet<object>();
-
-    // Missing Web API properties and explicit nulls both mean "no value". Empty strings
-    // remain empty strings, so clearing a null text field to "" is still a difference.
-    const absent = (value: unknown) => value === null || value === undefined ? null : value;
-    const number = (value: unknown) => {
-      if (value === null || value === undefined || value === '') return absent(value);
-      const parsed = typeof value === 'number' ? value : Number(String(value).replace(',', '.'));
-      return Number.isFinite(parsed) ? parsed : String(value);
-    };
-    const isoUtc = (value: unknown) => {
-      if (value === null || value === undefined || value === '') return absent(value);
-      const date = value instanceof Date ? value : new Date(String(value));
-      return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
-    };
-    const lookup = (value: unknown) => {
-      const items = Array.isArray(value) ? value : value ? [value] : [];
-      if (!items.length) return null;
-      return items.map((item: any) => ({
-        id: guid(item?.id ?? item?.value) ?? '',
-        logicalName: String(item?.entityType ?? item?.logicalName ?? '').toLowerCase(),
-      })).sort((a, b) => `${a.logicalName}:${a.id}`.localeCompare(`${b.logicalName}:${b.id}`));
-    };
-    const normalize = (type: string, value: unknown) => {
-      const kind = type.toLowerCase();
-      if (kind === 'lookup' || kind === 'customer' || kind === 'owner') return lookup(value);
-      if (['picklist', 'state', 'status', 'optionset', 'choice', 'integer', 'bigint'].includes(kind)) return number(value);
-      if (kind === 'datetime' || kind === 'date') return isoUtc(value);
-      if (['money', 'decimal', 'double'].includes(kind)) return number(value);
-      if (kind === 'multiselectpicklist' || kind === 'multiselectoptionset') {
-        if (value === null || value === undefined) return null;
-        const values = Array.isArray(value) ? value : String(value).split(',');
-        return [...new Set(values.map(number) as (number | string)[])].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-      }
-      return absent(value);
-    };
-    const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
-    const display = (value: unknown) => value === undefined ? 'undefined' : value === null ? 'null' : value === '' ? '""' :
-      typeof value === 'string' ? value : JSON.stringify(value);
-
-    function differences(): Difference[] {
-      if (!baselineReady) return [];
-      return fields.flatMap(field => {
-        const serverValue = baseline.get(field.name);
-        const currentValue = normalize(field.type, field.attribute.getValue?.());
-        return same(serverValue, currentValue) ? [] : [{
-          name: field.name, schema: field.schema, type: field.type, required: field.required, dirty: true,
-          serverValue: display(serverValue), currentValue: display(currentValue),
-        }];
-      });
+    async function getCollection(path: string) {
+      const response = await fetch(path, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
+      if (!response.ok) throw new Error(`Dataverse search failed (${response.status} ${response.statusText})`);
+      return (await response.json()).value as any[];
     }
 
-    function publishDifferences() {
-      window.postMessage({ channel: CHANNEL, direction: 'event', action: 'fieldsChanged', result: differences() }, '*');
+    const postEvent = (event: string, payload?: unknown) =>
+      window.postMessage({ channel: CHANNEL, direction: 'event', event, payload }, '*');
+
+    function fieldState(attribute: any) {
+      return {
+        name: attribute.getName(),
+        dirty: Boolean(attribute.getIsDirty?.()),
+        value: attribute.getValue?.(),
+      };
     }
 
-    async function loadServerSnapshot(sequence = refreshSequence) {
-      const Xrm = xrm();
-      const entity = Xrm.Page?.data?.entity;
-      const entityName = entity?.getEntityName?.();
-      const id = guid(entity?.getId?.());
-      if (!entityName || !id || !fields.length) { baseline = new Map(); baselineReady = false; publishDifferences(); return; }
-
-      const metadataUrl = `/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(entityName)}')?$select=EntitySetName`;
-      const metadataResponse = await fetch(metadataUrl, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
-      if (!metadataResponse.ok) throw new Error(`Unable to resolve entity set (${metadataResponse.status})`);
-      const { EntitySetName: entitySetName } = await metadataResponse.json();
-      const select = fields.map(field => ['lookup', 'customer', 'owner'].includes(field.type.toLowerCase()) ? `_${field.name}_value` : field.name);
-      const recordUrl = `/api/data/v9.2/${encodeURIComponent(entitySetName)}(${id})?$select=${select.map(encodeURIComponent).join(',')}`;
-      const response = await fetch(recordUrl, {
-        headers: { Accept: 'application/json', Prefer: 'odata.include-annotations="Microsoft.Dynamics.CRM.lookuplogicalname"', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' },
-      });
-      if (!response.ok) throw new Error(`Unable to load server snapshot (${response.status})`);
-      const record = await response.json();
-      const next = new Map<string, unknown>();
-      for (const field of fields) {
-        const lookupKey = `_${field.name}_value`;
-        const raw = ['lookup', 'customer', 'owner'].includes(field.type.toLowerCase())
-          ? record[lookupKey] == null ? null : [{ id: record[lookupKey], entityType: record[`${lookupKey}@Microsoft.Dynamics.CRM.lookuplogicalname`] }]
-          : record[field.name];
-        next.set(field.name, normalize(field.type, raw));
-      }
-      // A slower refresh must never replace a baseline loaded by a newer one.
-      if (sequence !== refreshSequence) return;
-      baseline = next;
-      baselineReady = true;
-      publishDifferences();
-    }
-
-    async function refreshBaseline() {
-      const sequence = ++refreshSequence;
-      await loadServerSnapshot(sequence);
-    }
-
-    async function initialize() {
-      const Xrm = xrm();
-      const page = Xrm.Page;
+    function subscribe(page: any) {
       const entity = page?.data?.entity;
-      const nextKey = `${entity?.getEntityName?.() ?? ''}:${guid(entity?.getId?.()) ?? ''}`;
-      if (nextKey === recordKey && fields.length) return;
-      recordKey = nextKey;
-      fields = [];
-      baseline = new Map();
-      baselineReady = false;
-
-      const liveAttributes: any[] = [];
-      entity?.attributes?.forEach((attribute: any) => liveAttributes.push(attribute));
-      const logicalName = entity?.getEntityName?.();
-      let metadata = new Map<string, any>();
-      if (logicalName) {
-        const url = `/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(logicalName)}')/Attributes?$select=LogicalName,SchemaName,AttributeType,RequiredLevel`;
-        const response = await fetch(url, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
-        if (response.ok) {
-          const json = await response.json();
-          metadata = new Map(json.value.map((item: any) => [item.LogicalName, item]));
-        }
-      }
-      fields = liveAttributes.map(attribute => {
-        const item = metadata.get(attribute.getName());
-        return {
-          name: attribute.getName(), schema: item?.SchemaName ?? attribute.getName(),
-          type: item?.AttributeType ?? attribute.getAttributeType(),
-          required: item?.RequiredLevel?.Value ?? attribute.getRequiredLevel(), attribute,
-        };
+      const key = `${entity?.getEntityName?.() ?? ''}:${guid(entity?.getId?.()) ?? ''}`;
+      if (!entity || key === subscriptionKey) return;
+      unsubscribe?.();
+      subscriptionKey = key;
+      const removers: Array<() => void> = [];
+      entity.attributes?.forEach((attribute: any) => {
+        const handler = () => postEvent('attribute-change', fieldState(attribute));
+        attribute.addOnChange?.(handler);
+        removers.push(() => attribute.removeOnChange?.(handler));
       });
-      await loadServerSnapshot();
-
-      for (const field of fields) if (!hookedAttributes.has(field.attribute)) {
-        field.attribute.addOnChange?.(publishDifferences);
-        hookedAttributes.add(field.attribute);
-      }
-      if (entity && !hookedEntities.has(entity)) {
-        entity.addOnPostSave?.((context: any) => {
-          const saveError = context?.getEventArgs?.()?.getSaveErrorInfo?.();
-          if (!saveError || !saveError.errorCode) void refreshBaseline().catch(() => undefined);
-        });
-        hookedEntities.add(entity);
-      }
-      if (page?.data && !hookedData.has(page.data)) {
-        page.data.addOnLoad?.(() => { void refreshBaseline().catch(() => undefined); });
-        hookedData.add(page.data);
-      }
+      const publishAll = (reason: string) => {
+        const fields: unknown[] = [];
+        entity.attributes?.forEach((attribute: any) => fields.push(fieldState(attribute)));
+        postEvent('fields-state', { reason, fields });
+      };
+      const onSave = (eventContext: any) => {
+        postEvent('form-save', { saveMode: eventContext.getEventArgs?.()?.getSaveMode?.() });
+        // Autosave clears dirty flags asynchronously. The post-save hook is preferred;
+        // this fallback also supports older UCI clients that do not expose it.
+        window.setTimeout(() => publishAll('save-complete'), 750);
+      };
+      const onPostSave = () => publishAll('save-complete');
+      const onLoad = () => publishAll('form-load');
+      entity.addOnSave?.(onSave);
+      entity.addOnPostSave?.(onPostSave);
+      page.data?.addOnLoad?.(onLoad);
+      removers.push(
+        () => entity.removeOnSave?.(onSave),
+        () => entity.removeOnPostSave?.(onPostSave),
+        () => page.data?.removeOnLoad?.(onLoad),
+      );
+      unsubscribe = () => { removers.splice(0).forEach(remove => remove()); subscriptionKey = ''; };
     }
 
+    async function getMetadata(orgUrl: string, logicalName: string) {
+      const cacheKey = `dynamics-toolkit:metadata:${orgUrl}:${logicalName}`;
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) ?? 'null');
+        if (cached?.savedAt > Date.now() - CACHE_TTL && Array.isArray(cached.value)) return cached.value;
+      } catch { /* Invalid or inaccessible cache: fetch a fresh copy. */ }
+      const url = `${orgUrl}/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(logicalName)}')/Attributes?$select=LogicalName,SchemaName,AttributeType,RequiredLevel`;
+      const response = await fetch(url, { headers: { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } });
+      if (!response.ok) return [];
+      const value = (await response.json()).value;
+      try { localStorage.setItem(cacheKey, JSON.stringify({ savedAt: Date.now(), value })); } catch { /* Storage can be disabled. */ }
+      return value;
+    }
+
+    window.addEventListener('pagehide', () => unsubscribe?.());
     window.addEventListener('message', async (event) => {
       if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'request') return;
       const { id, action, payload } = event.data;
@@ -171,21 +87,94 @@ export default defineContentScript({
         const Xrm = xrm();
         if (!Xrm?.Utility?.getGlobalContext) throw new Error('Dynamics Xrm API is not available in this frame');
         const page = Xrm.Page;
+        const entity = page?.data?.entity;
+        subscribe(page);
         let result: unknown;
         if (action === 'context') {
-          const entity = page?.data?.entity;
           const global = Xrm.Utility.getGlobalContext();
           result = { connected: true, orgUrl: global.getClientUrl(), orgName: global.organizationSettings?.uniqueName, entityName: entity?.getEntityName(), recordId: guid(entity?.getId()), recordName: entity?.getPrimaryAttributeValue(), formName: page?.ui?.formSelector?.getCurrentItem?.()?.getLabel(), formType: page?.ui?.getFormType() };
         } else if (action === 'fields') {
-          initialization ??= initialize().finally(() => { initialization = undefined; });
-          await initialization;
-          result = differences();
+          const controlsByAttribute = new Map<string, string[]>();
+          page?.ui?.controls?.forEach((control: any) => {
+            const attributeName = control.getAttribute?.()?.getName?.();
+            const controlName = control.getName?.();
+            if (!attributeName || !controlName) return;
+            const names = controlsByAttribute.get(attributeName) ?? [];
+            if (!names.includes(controlName)) names.push(controlName);
+            controlsByAttribute.set(attributeName, names);
+          });
+          const liveAttributes: any[] = [];
+          entity?.attributes?.forEach((attribute: any) => liveAttributes.push({
+            ...fieldState(attribute),
+            type: attribute.getAttributeType(),
+            required: attribute.getRequiredLevel(),
+            controlNames: controlsByAttribute.get(attribute.getName()) ?? [],
+          }));
+          const logicalName = entity?.getEntityName?.();
+          const orgUrl = Xrm.Utility.getGlobalContext().getClientUrl().replace(/\/$/, '');
+          const metadata = new Map<string, any>((logicalName ? await getMetadata(orgUrl, logicalName) : []).map((item: any) => [item.LogicalName, item]));
+          result = liveAttributes.map(attribute => {
+            const item = metadata.get(attribute.name);
+            return { ...attribute, schema: item?.SchemaName ?? attribute.name, type: item?.AttributeType ?? attribute.type, required: item?.RequiredLevel?.Value ?? attribute.required };
+          });
         } else if (action === 'request') {
-          const response = await fetch(payload.path, { method: payload.method, headers: { Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' }, body: ['POST', 'PATCH', 'PUT'].includes(payload.method) && payload.body ? payload.body : undefined });
+          const controller = new AbortController();
+          requests.set(payload.requestId, controller);
+          const headers = new Headers({ Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' });
+          for (const header of payload.headers ?? []) if (header.name.trim()) headers.set(header.name.trim(), header.value);
+          if (['POST', 'PATCH', 'PUT'].includes(payload.method) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json; charset=utf-8');
+          const response = await fetch(payload.path, {
+            method: payload.method,
+            headers,
+            body: ['POST', 'PATCH', 'PUT'].includes(payload.method) && payload.body ? payload.body : undefined,
+            signal: controller.signal,
+          });
           result = { status: response.status, statusText: response.statusText, body: await response.text() };
+        } else if (action === 'searchComponents') {
+          const query = String(payload?.query ?? '').trim();
+          const limit = Math.min(Math.max(Number(payload?.limit) || 20, 1), 50);
+          if (!query) {
+            result = [];
+          } else {
+            const term = odataString(query);
+            const take = Math.min(limit, 10);
+            const api = '/api/data/v9.2';
+            const filter = (field: string) => encodeURIComponent(`contains(${field},'${term}')`);
+            const [tables, forms, savedViews, personalViews, steps, flows] = await Promise.all([
+              getCollection(`${api}/EntityDefinitions?$select=MetadataId,LogicalName,SchemaName,DisplayName&$filter=${filter('LogicalName')}&$top=${take}`),
+              getCollection(`${api}/systemforms?$select=formid,name,objecttypecode,type&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/savedqueries?$select=savedqueryid,name,returnedtypecode&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/userqueries?$select=userqueryid,name,returnedtypecode&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/sdkmessageprocessingsteps?$select=sdkmessageprocessingstepid,name,stage,mode&$filter=${filter('name')}&$top=${take}`),
+              getCollection(`${api}/workflows?$select=workflowid,name,statecode,statuscode&$filter=category%20eq%205%20and%20${filter('name')}&$top=${take}`),
+            ]);
+            const clientUrl = Xrm.Utility.getGlobalContext().getClientUrl();
+            const label = (item: any) => item.DisplayName?.UserLocalizedLabel?.Label || item.SchemaName || item.LogicalName;
+            const matches: ComponentSearchResult[] = [
+              ...tables.map(item => ({ id: guid(item.MetadataId)!, type: 'table' as const, name: label(item), subtitle: item.LogicalName, url: `${clientUrl}/tools/systemcustomization/Entities/EntityEditor.aspx?id=${guid(item.MetadataId)}` })),
+              ...forms.map(item => ({ id: guid(item.formid)!, type: 'form' as const, name: item.name, subtitle: String(item.objecttypecode ?? ''), entityName: 'systemform' })),
+              ...savedViews.map(item => ({ id: guid(item.savedqueryid)!, type: 'view' as const, name: item.name, subtitle: `System view · ${item.returnedtypecode ?? ''}`, entityName: 'savedquery' })),
+              ...personalViews.map(item => ({ id: guid(item.userqueryid)!, type: 'view' as const, name: item.name, subtitle: `Personal view · ${item.returnedtypecode ?? ''}`, entityName: 'userquery' })),
+              ...steps.map(item => ({ id: guid(item.sdkmessageprocessingstepid)!, type: 'plugin-step' as const, name: item.name, subtitle: `Stage ${item.stage} · ${item.mode === 0 ? 'Synchronous' : 'Asynchronous'}`, entityName: 'sdkmessageprocessingstep' })),
+              ...flows.map(item => ({ id: guid(item.workflowid)!, type: 'cloud-flow' as const, name: item.name, subtitle: item.statecode === 1 ? 'Activated' : 'Draft', entityName: 'workflow' })),
+            ];
+            result = matches.slice(0, limit);
+          }
+        } else if (action === 'openComponent') {
+          if (payload?.url) {
+            window.open(payload.url, '_blank', 'noopener');
+          } else if (payload?.entityName && payload?.id) {
+            await Xrm.Navigation.openForm({ entityName: payload.entityName, entityId: guid(payload.id), openInNewWindow: true });
+          } else {
+            throw new Error('This component does not have a valid navigation target');
+          }
+          result = true;
+        } else {
+          throw new Error(`Unknown page bridge action: ${String(action)}`);
         }
         window.postMessage({ channel: CHANNEL, direction: 'response', id, result }, '*');
       } catch (error) {
+        if (event.data?.payload?.requestId) requests.delete(event.data.payload.requestId);
         window.postMessage({ channel: CHANNEL, direction: 'response', id, error: error instanceof Error ? error.message : String(error) }, '*');
       }
     });
