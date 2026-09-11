@@ -117,7 +117,7 @@ export type PageBridgeSuccessResponse =
 export type PageBridgeResponse = PageBridgeSuccessResponse | (PageBridgeEnvelope & {
   direction: 'response';
   action: PageBridgeRequest['action'] | 'unknown';
-  token?: string;
+  token: string;
   error: string;
 });
 
