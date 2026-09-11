@@ -69,12 +69,14 @@ export interface ComponentSearchResult {
   url?: string;
 }
 
-export type PageBridgeRequest =
-  | { action: 'context' }
-  | { action: 'fields' }
-  | { action: 'request'; payload: { method: string; path: string; body?: string } }
-  | { action: 'searchComponents'; payload: { query: string; limit?: number } }
-  | { action: 'openComponent'; payload: ComponentSearchResult };
+export interface FieldInfo {
+  name: string;
+  schema: string;
+  type: string;
+  required: string;
+  dirty: boolean;
+  controlNames: string[];
+}
 
 export interface SavedEnvironment { id: string; name: string; url: string; kind: 'Dev' | 'Test' | 'Prod'; color: string; }
 
@@ -88,6 +90,40 @@ export interface WebApiRequest {
   headers?: WebApiHeader[];
 }
 export interface WebApiResponse { status: number; statusText: string; body: string; }
+
+interface PageBridgeEnvelope {
+  channel: 'dynamics-toolkit';
+  id: string;
+}
+
+export type PageBridgeRequest =
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'handshake'; payload: { token: string } })
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'context'; token: string; payload: null })
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'fields'; token: string; payload: null })
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'request'; token: string; payload: WebApiRequest })
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'cancelRequest'; token: string; payload: { requestId: string } })
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'searchComponents'; token: string; payload: { query: string; limit?: number } })
+  | (PageBridgeEnvelope & { direction: 'request'; action: 'openComponent'; token: string; payload: ComponentSearchResult });
+
+export type PageBridgeSuccessResponse =
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'handshake'; token: string; result: { accepted: true } })
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'context'; token: string; result: CrmContext })
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'fields'; token: string; result: FieldInfo[] })
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'request'; token: string; result: WebApiResponse })
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'cancelRequest'; token: string; result: boolean })
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'searchComponents'; token: string; result: ComponentSearchResult[] })
+  | (PageBridgeEnvelope & { direction: 'response'; action: 'openComponent'; token: string; result: boolean });
+
+export type PageBridgeResponse = PageBridgeSuccessResponse | (PageBridgeEnvelope & {
+  direction: 'response';
+  action: PageBridgeRequest['action'] | 'unknown';
+  token?: string;
+  error: string;
+});
+
+export type PageBridgeEvent =
+  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'attribute-change'; payload: { name: string; dirty: boolean } }
+  | { channel: 'dynamics-toolkit'; direction: 'event'; event: 'fields-state'; payload: { reason: string; fields: Array<{ name: string; dirty: boolean }> } };
 
 export interface RequestHistoryItem {
   id: string;

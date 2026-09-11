@@ -1,8 +1,15 @@
-import type { ComponentSearchResult, CrmContext, ToolMessage } from '../shared/types';
+import type {
+  ComponentSearchResult,
+  CrmContext,
+  FieldInfo,
+  PageBridgeEvent,
+  PageBridgeRequest,
+  PageBridgeResponse,
+  PerformanceSnapshot,
+  ToolMessage,
+} from '../shared/types';
 
-type FieldInfo = { name: string; schema: string; type: string; required: string; dirty: boolean; controlNames: string[] };
-type PageEvent = { channel?: string; direction?: string; event?: string; payload?: any };
-const CHANNEL = 'dynamics-toolkit';
+const CHANNEL = 'dynamics-toolkit' as const;
 const THEME_STYLE_ID = 'dynamics-toolkit-theme';
 const CUSTOM_STYLE_ID = 'dynamics-toolkit-custom-css';
 const UCI_THEME_CSS = `
@@ -17,165 +24,191 @@ img, picture, video, canvas, svg, iframe, object, embed, [data-id*="webresource"
 `;
 const escapeHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
-function callPage<T>(action: string, payload?: unknown, timeout = 10_000): Promise<T> {
-  const id = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { window.removeEventListener('message', receive); reject(new Error('Dynamics page bridge timed out')); }, timeout);
-    function receive(event: MessageEvent) {
-      if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'response' || event.data.id !== id) return;
-      clearTimeout(timer); window.removeEventListener('message', receive);
-      event.data.error ? reject(new Error(event.data.error)) : resolve(event.data.result);
-    }
-    window.addEventListener('message', receive);
-    window.postMessage({ channel: CHANNEL, direction: 'request', id, action, payload }, '*');
+type BridgeAction = Exclude<PageBridgeRequest['action'], 'handshake'>;
+type BridgePayload<A extends BridgeAction> = Extract<PageBridgeRequest, { action: A }>['payload'];
+type BridgeResult<A extends BridgeAction> = Extract<PageBridgeResponse, { action: A; result: unknown }>['result'];
+type PendingRequest = { resolve(response: PageBridgeResponse): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
+
+function createPageBridge(token: string) {
+  const pending = new Map<string, PendingRequest>();
+  let tornDown = false;
+  const receive = (event: MessageEvent<unknown>) => {
+    if (event.source !== window || event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+    const response = event.data as Partial<PageBridgeResponse>;
+    if (response.channel !== CHANNEL || response.direction !== 'response' || typeof response.id !== 'string') return;
+    if (response.action !== 'handshake' && response.token !== token) return;
+    const request = pending.get(response.id);
+    if (!request) return;
+    pending.delete(response.id);
+    clearTimeout(request.timer);
+    request.resolve(response as PageBridgeResponse);
+  };
+  window.addEventListener('message', receive);
+
+  const send = (request: PageBridgeRequest, timeout: number) => new Promise<PageBridgeResponse>((resolve, reject) => {
+    if (tornDown) return reject(new Error('Dynamics page bridge was torn down'));
+    const timer = setTimeout(() => {
+      pending.delete(request.id);
+      reject(new Error(`Dynamics page bridge timed out (${request.action})`));
+    }, timeout);
+    pending.set(request.id, { resolve, reject, timer });
+    window.postMessage(request, window.location.origin);
   });
 
   return {
     async handshake() {
-      const response = await send({ channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action: 'handshake', payload: { token } });
+      const response = await send({ channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action: 'handshake', payload: { token } }, 4_000);
       if ('error' in response) throw new Error(response.error);
       if (response.action !== 'handshake' || response.token !== token || !response.result.accepted) throw new Error('Invalid bridge handshake response');
     },
-    async call<A extends keyof BridgeResults>(action: A, payload: BridgePayloads[A]): Promise<BridgeResults[A]> {
-      const request = { channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action, token, payload } as BridgeRequest;
-      const response = await send(request);
+    async call<A extends BridgeAction>(action: A, payload: BridgePayload<A>, timeout = 10_000): Promise<BridgeResult<A>> {
+      const request = { channel: CHANNEL, direction: 'request', id: crypto.randomUUID(), action, token, payload } as PageBridgeRequest;
+      const response = await send(request, timeout);
       if ('error' in response) throw new Error(response.error);
       if (response.action !== action) throw new Error('Bridge returned a mismatched action');
-      return response.result as BridgeResults[A];
+      return response.result as BridgeResult<A>;
     },
     teardown() {
+      if (tornDown) return;
+      tornDown = true;
       window.removeEventListener('message', receive);
-      for (const entry of pending.values()) {
-        clearTimeout(entry.timer);
-        entry.reject(new Error('Dynamics page bridge was torn down'));
+      for (const request of pending.values()) {
+        clearTimeout(request.timer);
+        request.reject(new Error('Dynamics page bridge was torn down'));
       }
       pending.clear();
     },
   };
 }
 
-function installUi(context: CrmContext, initialFields: FieldInfo[]) {
+type PageBridge = ReturnType<typeof createPageBridge>;
+
+function installUi(context: CrmContext, initialFields: FieldInfo[], bridge: PageBridge) {
   document.getElementById('dt-host')?.remove();
+  const controller = new AbortController();
+  const fields = new Map(initialFields.map(field => [field.name, { ...field }]));
+  const decorated = new Map<HTMLElement, { field: string; enter: (event: PointerEvent) => void; leave: () => void }>();
   const host = document.createElement('div'); host.id = 'dt-host'; document.documentElement.append(host);
   const root = host.attachShadow({ mode: 'open' });
   root.innerHTML = `<style>:host{all:initial}.badge{position:fixed;right:18px;bottom:18px;z-index:2147483647;font:13px Segoe UI,sans-serif;background:#111927;color:#fff;border:1px solid #334155;border-radius:12px;padding:8px;display:flex;align-items:center;gap:9px;box-shadow:0 12px 30px #0004}.mark{height:27px;width:27px;border-radius:8px;background:#8155ff;display:grid;place-items:center;font-weight:800}.meta{max-width:190px}.meta>*{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta small{color:#9ca7b8}.copy{border:0;background:#243044;color:#dbe4f0;border-radius:7px;padding:7px;cursor:pointer}.toast,.tip{position:fixed;z-index:2147483647;background:#111927;color:#fff;border:1px solid #40506a;padding:9px 12px;border-radius:8px;font:12px Segoe UI;pointer-events:none}.toast{right:18px;bottom:82px;opacity:0;transition:.2s}.toast.on{opacity:1}.tip{display:none}.tip b,.tip span{display:block}.tip span{color:#aab6c9;margin-top:3px}.palette{display:none;position:fixed;inset:0;z-index:2147483646;background:#02061777;place-items:start center;padding-top:12vh;font:14px Segoe UI}.palette.open{display:grid}.panel{width:min(590px,88vw);border:1px solid #475569;background:#101827;border-radius:14px;color:white;overflow:hidden;box-shadow:0 24px 70px #0008}.search{display:flex;gap:12px;padding:17px;border-bottom:1px solid #263449}.search input{width:100%;background:none;border:0;outline:0;color:white;font-size:16px}.results{max-height:420px;overflow:auto;margin:0;padding:6px;list-style:none}.state{padding:16px;color:#aeb9ca}.item{display:flex;align-items:center;gap:12px;padding:11px;border-radius:8px;cursor:pointer}.item.selected,.item:hover{background:#27344a}.kind{font-size:10px;text-transform:uppercase;color:#bba7ff;background:#31265b;padding:4px 6px;border-radius:5px;white-space:nowrap}.item-text{min-width:0}.item b,.item small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.item small{color:#97a5ba;margin-top:3px}.dirty{outline:2px solid #f59e0b!important;outline-offset:2px}</style><div class="badge"><div class="mark">D</div><div class="meta"><b>${escapeHtml(context.recordName || context.entityName || 'Dynamics record')}</b><small>${escapeHtml([context.entityName, context.recordId?.slice(0,8), context.formName].filter(Boolean).join(' · '))}</small></div><button class="copy">Copy</button></div><div class="toast">Context copied</div><div class="tip"></div><div class="palette" role="dialog" aria-label="Dynamics component search"><div class="panel"><div class="search"><span>⌘K</span><input aria-label="Search Dynamics components" autocomplete="off" placeholder="Search tables, forms, views, plugin steps and flows…"/></div><ul class="results" role="listbox"><li class="state">Type a component name to search in Dynamics</li></ul></div></div>`;
-  root.querySelector('.copy')!.addEventListener('click', async () => { await navigator.clipboard.writeText(`Record ID: ${context.recordId}\nEntity: ${context.entityName}\nForm: ${context.formName}`); const toast=root.querySelector('.toast')!;toast.classList.add('on');setTimeout(()=>toast.classList.remove('on'),1200); });
-  const tip = root.querySelector('.tip') as HTMLElement;
-  root.querySelector('.copy')!.addEventListener('click', async () => { await navigator.clipboard.writeText(`Record ID: ${context.recordId}\nEntity: ${context.entityName}\nForm: ${context.formName}`); const toast=root.querySelector('.toast')!;toast.classList.add('on');setTimeout(()=>toast.classList.remove('on'),1200); }, { signal: controller.signal });
+  const tip = root.querySelector<HTMLElement>('.tip')!;
+  const palette = root.querySelector<HTMLElement>('.palette')!;
+  const input = root.querySelector<HTMLInputElement>('.search input')!;
+  const list = root.querySelector<HTMLUListElement>('.results')!;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+
+  root.querySelector<HTMLButtonElement>('.copy')!.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(`Record ID: ${context.recordId}\nEntity: ${context.entityName}\nForm: ${context.formName}`);
+    const toast = root.querySelector<HTMLElement>('.toast')!;
+    toast.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('on'), 1200);
+  }, { signal: controller.signal });
 
   const positionTip = (event: PointerEvent) => {
-    const gap = 12; const bounds = tip.getBoundingClientRect();
-    tip.style.left = `${Math.max(8, Math.min(event.clientX + gap, innerWidth - bounds.width - 8))}px`;
-    tip.style.top = `${Math.max(8, Math.min(event.clientY + gap, innerHeight - bounds.height - 8))}px`;
+    const bounds = tip.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, Math.min(event.clientX + 12, innerWidth - bounds.width - 8))}px`;
+    tip.style.top = `${Math.max(8, Math.min(event.clientY + 12, innerHeight - bounds.height - 8))}px`;
   };
-  const interactive = (node: Element) => node.matches('input,textarea,select,button,[role="combobox"],[contenteditable="true"]');
-  const idsFor = (controlName: string) => [
-    `${controlName}.fieldControl-text-box-text`, `${controlName}.fieldControl-option-set-select`,
-    `${controlName}.fieldControl-date-time-input`, `${controlName}.fieldControl-checkbox-toggle`,
-    `${controlName}.fieldControl-LookupResultsDropdown_${controlName}_textInputBox_with_filter_new`,
-  ];
-  function findControls(field: FieldInfo) {
-    const result = new Set<HTMLElement>();
+  const idsFor = (name: string) => [`${name}.fieldControl-text-box-text`, `${name}.fieldControl-option-set-select`, `${name}.fieldControl-date-time-input`, `${name}.fieldControl-checkbox-toggle`, `${name}.fieldControl-LookupResultsDropdown_${name}_textInputBox_with_filter_new`];
+  const findControls = (field: FieldInfo) => {
+    const controls = new Set<HTMLElement>();
     for (const name of field.controlNames) for (const id of idsFor(name)) {
       const candidate = document.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`);
-      if (!candidate) continue;
-      const control = interactive(candidate) ? candidate : candidate.querySelector<HTMLElement>('input,textarea,select,button,[role="combobox"],[contenteditable="true"]');
-      if (control) result.add(control);
+      const control = candidate?.matches('input,textarea,select,button,[role="combobox"],[contenteditable="true"]') ? candidate : candidate?.querySelector<HTMLElement>('input,textarea,select,button,[role="combobox"],[contenteditable="true"]');
+      if (control) controls.add(control);
     }
-    return result;
-  }
-  function scan() {
+    return controls;
+  };
+  const updateMarks = () => {
+    for (const [node, binding] of decorated) {
+      const dirty = fields.get(binding.field)?.dirty;
+      node.style.outline = dirty ? '2px solid #f59e0b' : '';
+      node.style.outlineOffset = dirty ? '2px' : '';
+    }
+  };
+  const scan = () => {
     for (const field of fields.values()) for (const node of findControls(field)) {
       if (decorated.has(node)) continue;
-      const enter = (event: PointerEvent) => { const current = fields.get(field.name) ?? field; tip.innerHTML=`<b>${escapeHtml(current.schema)}</b><span>Logical: ${escapeHtml(current.name)} · ${escapeHtml(current.type)} · ${escapeHtml(current.required)}${current.dirty?' · modified':''}</span>`;tip.style.display='block';positionTip(event); };
-      const leave = () => { tip.style.display='none'; };
+      const enter = (event: PointerEvent) => { const current = fields.get(field.name) ?? field; tip.innerHTML = `<b>${escapeHtml(current.schema)}</b><span>Logical: ${escapeHtml(current.name)} · ${escapeHtml(current.type)} · ${escapeHtml(current.required)}${current.dirty ? ' · modified' : ''}</span>`; tip.style.display = 'block'; positionTip(event); };
+      const leave = () => { tip.style.display = 'none'; };
       node.addEventListener('pointerenter', enter); node.addEventListener('pointermove', positionTip); node.addEventListener('pointerleave', leave);
       decorated.set(node, { field: field.name, enter, leave });
     }
     for (const [node, binding] of decorated) if (!node.isConnected) { node.removeEventListener('pointerenter', binding.enter); node.removeEventListener('pointermove', positionTip); node.removeEventListener('pointerleave', binding.leave); decorated.delete(node); }
     updateMarks();
-  }
-  const palette = root.querySelector<HTMLElement>('.palette')!;
-  const input = root.querySelector<HTMLInputElement>('.search input')!;
-  const list = root.querySelector<HTMLUListElement>('.results')!;
+  };
+  const observer = new MutationObserver(scan);
+  observer.observe(document.documentElement, { childList: true, subtree: true }); scan();
+
   let results: ComponentSearchResult[] = [];
   let selected = -1;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
   let requestNumber = 0;
   const state = (message: string) => { list.innerHTML = `<li class="state">${escapeHtml(message)}</li>`; };
-  const render = () => {
-    if (!results.length) { state('No matching components'); return; }
-    list.innerHTML = results.map((item, index) => `<li class="item${index === selected ? ' selected' : ''}" role="option" aria-selected="${index === selected}" data-index="${index}"><span class="kind">${escapeHtml(item.type.replace('-', ' '))}</span><span class="item-text"><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.subtitle ?? '')}</small></span></li>`).join('');
-    list.querySelector('.selected')?.scrollIntoView({ block: 'nearest' });
-  };
-  const open = async (index: number) => {
-    const item = results[index];
-    if (!item) return;
-    try { await callPage<boolean>('openComponent', item, 10000); palette.classList.remove('open'); }
-    catch (error) { state(error instanceof Error ? error.message : 'Could not open component'); }
-  };
+  const render = () => { if (!results.length) return state('No matching components'); list.innerHTML = results.map((item, index) => `<li class="item${index === selected ? ' selected' : ''}" role="option" aria-selected="${index === selected}" data-index="${index}"><span class="kind">${escapeHtml(item.type.replace('-', ' '))}</span><span class="item-text"><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.subtitle ?? '')}</small></span></li>`).join(''); list.querySelector('.selected')?.scrollIntoView({ block: 'nearest' }); };
+  const open = async (index: number) => { const item = results[index]; if (!item) return; try { await bridge.call('openComponent', item); palette.classList.remove('open'); } catch (error) { state(error instanceof Error ? error.message : 'Could not open component'); } };
   input.addEventListener('input', () => {
-    clearTimeout(debounceTimer); selected = -1;
-    const current = ++requestNumber;
-    const query = input.value.trim();
+    clearTimeout(debounceTimer); selected = -1; const current = ++requestNumber; const query = input.value.trim();
     if (!query) { results = []; state('Type a component name to search in Dynamics'); return; }
-    state('Searching…');
-    debounceTimer = setTimeout(async () => {
-      try {
-        const found = await callPage<ComponentSearchResult[]>('searchComponents', { query, limit: 20 }, 10000);
-        if (current !== requestNumber) return;
-        results = found; selected = results.length ? 0 : -1; render();
-      } catch (error) {
-        if (current === requestNumber) { results = []; selected = -1; state(error instanceof Error ? error.message : 'Search failed'); }
-      }
-    }, 300);
-  });
-  input.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { event.preventDefault(); palette.classList.remove('open'); return; }
-    if (event.key === 'Enter') { event.preventDefault(); void open(selected); return; }
-    if (!results.length || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp')) return;
-    event.preventDefault();
-    selected = event.key === 'ArrowDown' ? (selected + 1) % results.length : (selected - 1 + results.length) % results.length;
-    render();
-  });
-  list.addEventListener('mousemove', event => { const row = (event.target as Element).closest<HTMLElement>('[data-index]'); if (row && selected !== Number(row.dataset.index)) { selected = Number(row.dataset.index); render(); } });
-  list.addEventListener('click', event => { const row = (event.target as Element).closest<HTMLElement>('[data-index]'); if (row) void open(Number(row.dataset.index)); });
-  palette.addEventListener('mousedown', event => { if (event.target === palette) palette.classList.remove('open'); });
-  return { root, palette };
+    state('Searching…'); debounceTimer = setTimeout(async () => { try { const found = await bridge.call('searchComponents', { query, limit: 20 }); if (current !== requestNumber) return; results = found; selected = results.length ? 0 : -1; render(); } catch (error) { if (current === requestNumber) state(error instanceof Error ? error.message : 'Search failed'); } }, 300);
+  }, { signal: controller.signal });
+  input.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); palette.classList.remove('open'); } else if (event.key === 'Enter') { event.preventDefault(); void open(selected); } else if (results.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); selected = event.key === 'ArrowDown' ? (selected + 1) % results.length : (selected - 1 + results.length) % results.length; render(); } }, { signal: controller.signal });
+  list.addEventListener('mousemove', event => { const row = (event.target as Element).closest<HTMLElement>('[data-index]'); if (row && selected !== Number(row.dataset.index)) { selected = Number(row.dataset.index); render(); } }, { signal: controller.signal });
+  list.addEventListener('click', event => { const row = (event.target as Element).closest<HTMLElement>('[data-index]'); if (row) void open(Number(row.dataset.index)); }, { signal: controller.signal });
+  palette.addEventListener('mousedown', event => { if (event.target === palette) palette.classList.remove('open'); }, { signal: controller.signal });
+
+  const cleanup = () => { observer.disconnect(); controller.abort(); clearTimeout(debounceTimer); clearTimeout(toastTimer); for (const [node, binding] of decorated) { node.removeEventListener('pointerenter', binding.enter); node.removeEventListener('pointermove', positionTip); node.removeEventListener('pointerleave', binding.leave); node.style.outline = ''; node.style.outlineOffset = ''; } decorated.clear(); host.remove(); };
+  return {
+    root, palette, cleanup,
+    updateField(name: string, dirty: boolean) { const field = fields.get(name); if (field) field.dirty = dirty; updateMarks(); },
+    applyFields(nextFields: FieldInfo[]) { fields.clear(); nextFields.forEach(field => fields.set(field.name, { ...field })); scan(); },
+    updateFields(states: Array<{ name: string; dirty: boolean }>) { states.forEach(state => { const field = fields.get(state.name); if (field) field.dirty = state.dirty; }); updateMarks(); },
+  };
 }
+
+function setStyle(id: string, css: string) { let style = document.getElementById(id) as HTMLStyleElement | null; if (!css) { style?.remove(); return; } if (!style) { style = document.createElement('style'); style.id = id; (document.head || document.documentElement).append(style); } style.textContent = css; }
+function applyAppearance(themeEnabled: boolean, customCssEnabled: boolean, customCss: string) { setStyle(THEME_STYLE_ID, themeEnabled && !/\/webresources?\//i.test(location.pathname) ? UCI_THEME_CSS : ''); setStyle(CUSTOM_STYLE_ID, customCssEnabled ? customCss : ''); }
 
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'], allFrames: true,
-  async main() {
-    const receivePerformance = (event: MessageEvent) => {
-      if (event.source !== window || event.data?.channel !== CHANNEL || event.data?.direction !== 'performance') return;
-      void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: event.data.snapshot as PerformanceSnapshot } satisfies ToolMessage).catch(() => undefined);
+  async main(ctx) {
+    const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
+    const bridge = createPageBridge(token);
+    let current: { key: string; context: CrmContext; ui: ReturnType<typeof installUi> } | undefined;
+    let stopped = false;
+    let navigationTimer: number | undefined;
+    const stored = await browser.storage.local.get(['themeEnabled', 'customCssEnabled', 'customCss']);
+    let themeEnabled = Boolean(stored.themeEnabled), customCssEnabled = Boolean(stored.customCssEnabled), customCss = typeof stored.customCss === 'string' ? stored.customCss : '';
+    applyAppearance(themeEnabled, customCssEnabled, customCss);
+
+    const initialize = async () => {
+      const context = await bridge.call('context', null).catch(() => undefined);
+      if (!context || stopped) return;
+      const key = `${context.entityName ?? ''}:${context.recordId ?? ''}:${context.formId ?? ''}`;
+      if (current?.key === key) return;
+      const fields = await bridge.call('fields', null).catch(() => []);
+      if (stopped) return;
+      current?.ui.cleanup(); current = { key, context, ui: installUi(context, fields, bridge) };
+      await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
     };
-    window.addEventListener('message', receivePerformance);
-    let context: CrmContext;
-    try {
-      await bridge.handshake();
-      context = await bridge.call('context', null);
-    } catch {
-      bridge.teardown();
-      return;
-    }
-    const fields = await bridge.call('fields', null).catch(() => []);
-    const ui = installUi(context, fields);
-    window.addEventListener('message', event => {
-      if (event.source === window && event.data?.channel === CHANNEL && event.data?.direction === 'event' && event.data?.action === 'fieldsChanged') ui?.applyFields(event.data.result ?? []);
-    });
-    await browser.runtime.sendMessage({ type: 'REGISTER_CONTEXT', context } satisfies ToolMessage).catch(() => undefined);
-    browser.runtime.onMessage.addListener(async (message: ToolMessage) => {
-      if (message.type === 'GET_CONTEXT') return context;
-      if (message.type === 'RUN_REQUEST') return callPage<WebApiResponse>('request', message.request, 120000);
-      if (message.type === 'CANCEL_REQUEST') return callPage('cancelRequest', { requestId: message.requestId });
-      if (message.type === 'OPEN_PALETTE') { ui?.palette.classList.add('open'); (ui?.root.querySelector('input') as HTMLInputElement)?.focus(); }
-      if (message.type === 'TOGGLE_THEME') document.documentElement.style.filter = message.enabled ? 'invert(.88) hue-rotate(180deg)' : '';
+    const onPageEvent = (event: MessageEvent<unknown>) => {
+      if (event.source !== window || event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+      const pageEvent = event.data as PageBridgeEvent;
+      if (pageEvent.channel !== CHANNEL || pageEvent.direction !== 'event') return;
+      if (pageEvent.event === 'attribute-change') current?.ui.updateField(pageEvent.payload.name, pageEvent.payload.dirty);
+      else if (pageEvent.event === 'fields-state') current?.ui.updateFields(pageEvent.payload.fields);
     };
-    const cleanup = () => { if (stopped) return; stopped = true; if (navigationTimer !== undefined) clearInterval(navigationTimer); window.removeEventListener('message', onPageEvent); window.removeEventListener('pagehide', cleanup); browser.runtime.onMessage.removeListener(onRuntimeMessage); current?.ui.cleanup(); };
-    window.addEventListener('message', onPageEvent); window.addEventListener('pagehide', cleanup); browser.runtime.onMessage.addListener(onRuntimeMessage);
-    await initialize();
-    navigationTimer = window.setInterval(initialize, 1000);
+    const onPerformance = (event: MessageEvent<unknown>) => { const data = event.data as { channel?: string; direction?: string; snapshot?: PerformanceSnapshot }; if (event.source === window && data?.channel === CHANNEL && data.direction === 'performance' && data.snapshot) void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: data.snapshot } satisfies ToolMessage).catch(() => undefined); };
+    const onRuntimeMessage = async (message: ToolMessage) => {
+      if (message.type === 'GET_CONTEXT') return current?.context;
+      if (message.type === 'RUN_REQUEST') return bridge.call('request', message.request, 120_000);
+      if (message.type === 'CANCEL_REQUEST') return bridge.call('cancelRequest', { requestId: message.requestId });
+      if (message.type === 'OPEN_PALETTE') { current?.ui.palette.classList.add('open'); current?.ui.root.querySelector<HTMLInputElement>('input')?.focus(); }
+      if (message.type === 'TOGGLE_THEME') { themeEnabled = message.enabled; applyAppearance(themeEnabled, customCssEnabled, customCss); }
+    };
+    const onStorageChanged = (changes: Record<string, Browser.storage.StorageChange>, area: string) => { if (area !== 'local') return; if (changes.themeEnabled) themeEnabled = Boolean(changes.themeEnabled.newValue); if (changes.customCssEnabled) customCssEnabled = Boolean(changes.customCssEnabled.newValue); if (changes.customCss) customCss = typeof changes.customCss.newValue === 'string' ? changes.customCss.newValue : ''; applyAppearance(themeEnabled, customCssEnabled, customCss); };
+    const cleanup = () => { if (stopped) return; stopped = true; if (navigationTimer !== undefined) clearInterval(navigationTimer); window.removeEventListener('message', onPageEvent); window.removeEventListener('message', onPerformance); window.removeEventListener('pagehide', cleanup); browser.runtime.onMessage.removeListener(onRuntimeMessage); browser.storage.onChanged.removeListener(onStorageChanged); current?.ui.cleanup(); bridge.teardown(); };
+    ctx.onInvalidated(cleanup); window.addEventListener('message', onPageEvent); window.addEventListener('message', onPerformance); window.addEventListener('pagehide', cleanup, { once: true }); browser.runtime.onMessage.addListener(onRuntimeMessage); browser.storage.onChanged.addListener(onStorageChanged);
+    try { await bridge.handshake(); } catch { cleanup(); return; }
+    await initialize(); navigationTimer = window.setInterval(initialize, 1000);
   },
 });
