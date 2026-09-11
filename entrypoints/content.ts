@@ -205,8 +205,9 @@ function installUi(context: CrmContext, initialFields: FieldInfo[], bridge: Page
   };
 }
 
-function setStyle(id: string, css: string) { let style = document.getElementById(id) as HTMLStyleElement | null; if (!css) { style?.remove(); return; } if (!style) { style = document.createElement('style'); style.id = id; (document.head || document.documentElement).append(style); } style.textContent = css; }
-function applyAppearance(themeEnabled: boolean, customCssEnabled: boolean, customCss: string) { setStyle(THEME_STYLE_ID, themeEnabled && !/\/webresources?\//i.test(location.pathname) ? UCI_THEME_CSS : ''); setStyle(CUSTOM_STYLE_ID, customCssEnabled ? customCss : ''); }
+function setStyle(id: string, css: string) { let style = document.querySelector<HTMLStyleElement>(`style#${id}`); if (!css) { style?.remove(); return; } if (!style) { style = document.createElement('style'); style.id = id; (document.head || document.documentElement).append(style); } style.textContent = css; }
+function applyTheme(enabled: boolean) { setStyle(THEME_STYLE_ID, enabled ? UCI_THEME_CSS : ''); }
+function applyCustomCss(enabled: boolean, css: string) { setStyle(CUSTOM_STYLE_ID, enabled ? css : ''); }
 
 export default defineContentScript({
   matches: ['https://*.dynamics.com/*'], allFrames: true,
@@ -218,7 +219,8 @@ export default defineContentScript({
     let navigationTimer: number | undefined;
     const stored = await browser.storage.local.get(['themeEnabled', 'customCssEnabled', 'customCss']);
     let themeEnabled = Boolean(stored.themeEnabled), customCssEnabled = Boolean(stored.customCssEnabled), customCss = typeof stored.customCss === 'string' ? stored.customCss : '';
-    applyAppearance(themeEnabled, customCssEnabled, customCss);
+    applyTheme(themeEnabled);
+    applyCustomCss(customCssEnabled, customCss);
 
     const initialize = async () => {
       const context = await bridge.call('context', null).catch(() => undefined);
@@ -250,10 +252,10 @@ export default defineContentScript({
       if (message.type === 'CANCEL_REQUEST') return bridge.call('cancelRequest', { requestId: message.requestId });
       if (message.type === 'GET_RELATIONSHIPS') return bridge.call('getRelationships', message.request, 120_000) satisfies Promise<RelationshipsResult>;
       if (message.type === 'OPEN_PALETTE') { current?.ui.palette.classList.add('open'); current?.ui.root.querySelector<HTMLInputElement>('input')?.focus(); }
-      if (message.type === 'TOGGLE_THEME') { themeEnabled = message.enabled; applyAppearance(themeEnabled, customCssEnabled, customCss); }
+      if (message.type === 'TOGGLE_THEME') { themeEnabled = message.enabled; applyTheme(themeEnabled); }
     };
-    const onStorageChanged = (changes: Record<string, Browser.storage.StorageChange>, area: string) => { if (area !== 'local') return; if (changes.themeEnabled) themeEnabled = Boolean(changes.themeEnabled.newValue); if (changes.customCssEnabled) customCssEnabled = Boolean(changes.customCssEnabled.newValue); if (changes.customCss) customCss = typeof changes.customCss.newValue === 'string' ? changes.customCss.newValue : ''; applyAppearance(themeEnabled, customCssEnabled, customCss); };
-    const cleanup = () => { if (stopped) return; stopped = true; if (navigationTimer !== undefined) clearInterval(navigationTimer); window.removeEventListener('message', onPageEvent); window.removeEventListener('message', onPerformance); window.removeEventListener('pagehide', cleanup); browser.runtime.onMessage.removeListener(onRuntimeMessage); browser.storage.onChanged.removeListener(onStorageChanged); current?.ui.cleanup(); bridge.teardown(); };
+    const onStorageChanged = (changes: Record<string, Browser.storage.StorageChange>, area: string) => { if (area !== 'local') return; if (changes.themeEnabled) { themeEnabled = Boolean(changes.themeEnabled.newValue); applyTheme(themeEnabled); } if (changes.customCssEnabled) customCssEnabled = Boolean(changes.customCssEnabled.newValue); if (changes.customCss) customCss = typeof changes.customCss.newValue === 'string' ? changes.customCss.newValue : ''; if (changes.customCssEnabled || changes.customCss) applyCustomCss(customCssEnabled, customCss); };
+    const cleanup = () => { if (stopped) return; stopped = true; if (navigationTimer !== undefined) clearInterval(navigationTimer); window.removeEventListener('message', onPageEvent); window.removeEventListener('message', onPerformance); window.removeEventListener('pagehide', cleanup); browser.runtime.onMessage.removeListener(onRuntimeMessage); browser.storage.onChanged.removeListener(onStorageChanged); current?.ui.cleanup(); document.querySelector(`style#${THEME_STYLE_ID}`)?.remove(); document.querySelector(`style#${CUSTOM_STYLE_ID}`)?.remove(); bridge.teardown(); };
     ctx.onInvalidated(cleanup); window.addEventListener('message', onPageEvent); window.addEventListener('message', onPerformance); window.addEventListener('pagehide', cleanup, { once: true }); browser.runtime.onMessage.addListener(onRuntimeMessage); browser.storage.onChanged.addListener(onStorageChanged);
     try { await bridge.handshake(); } catch { cleanup(); return; }
     await initialize(); navigationTimer = window.setInterval(initialize, 1000);
