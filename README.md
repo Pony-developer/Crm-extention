@@ -9,10 +9,13 @@ Chrome extension for Microsoft Dynamics 365 consultants, developers, and support
 - Field metadata tooltip (schema name, attribute type, required level) and dirty-field highlighting.
 - Developer command palette overlay and a Dynamics UI theme toggle.
 - Live plugin trace log retrieval and saved environment switching with record context preservation.
-- Side-panel shells for performance, relationships, and repro recording.
+- Compact relationship graph backed by the `OneToManyRelationships`, `ManyToOneRelationships`, and
+  `ManyToManyRelationships` EntityDefinitions navigation properties, with filtering, lazy expansion,
+  depth limits, metadata navigation, and organization-aware caching.
+- Side-panel shells for performance and repro recording.
 
 > Component search, validation that a record exists in a target org, performance instrumentation,
-> relationship metadata graphing, and screenshot/annotation capture are represented in the UI but are
+> screenshot/annotation capture are represented in the UI but are
 > roadmap items. They are deliberately not described as production-ready functionality.
 
 ## Architecture
