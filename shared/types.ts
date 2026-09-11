@@ -6,6 +6,7 @@ export type ToolMessage =
   | { type: 'CANCEL_REQUEST'; requestId: string }
   | { type: 'TOGGLE_THEME'; enabled: boolean }
   | { type: 'SET_THEME'; enabled: boolean }
+  | { type: 'CAPTURE_VISIBLE_TAB' }
   | { type: 'OPEN_PALETTE' };
 
 export interface CrmContext {
