@@ -7,6 +7,7 @@ export type ToolMessage =
   | { type: 'GET_ACTIVE_PERFORMANCE' }
   | { type: 'RUN_REQUEST'; request: WebApiRequest }
   | { type: 'CANCEL_REQUEST'; requestId: string }
+  | { type: 'GET_RELATIONSHIPS'; request: RelationshipsRequest }
   | { type: 'TOGGLE_THEME'; enabled: boolean }
   | { type: 'SET_THEME'; enabled: boolean }
   | { type: 'CAPTURE_VISIBLE_TAB' }
@@ -128,6 +129,29 @@ export interface HandshakeResponse { accepted: true; }
 export interface CancelRequest { requestId: string; }
 export interface ComponentSearchRequest { query: string; limit?: number; }
 
+export interface RelationshipsRequest { logicalName: string; }
+export interface OneToManyRelationshipMetadata {
+  MetadataId?: string;
+  SchemaName?: string;
+  ReferencedEntity?: string;
+  ReferencingEntity?: string;
+}
+export interface ManyToManyRelationshipMetadata {
+  MetadataId?: string;
+  SchemaName?: string;
+  Entity1LogicalName?: string;
+  Entity2LogicalName?: string;
+}
+export interface RelationshipsMetadata {
+  oneToMany: OneToManyRelationshipMetadata[];
+  manyToOne: OneToManyRelationshipMetadata[];
+  manyToMany: ManyToManyRelationshipMetadata[];
+}
+export interface RelationshipsError { message: string; status?: number; }
+export type RelationshipsResult =
+  | { ok: true; data: RelationshipsMetadata }
+  | { ok: false; error: RelationshipsError };
+
 export interface FieldState {
   name: string;
   dirty: boolean;
@@ -145,6 +169,7 @@ export interface PageBridgeActionMap {
   request: { payload: WebApiRequest; result: WebApiResponse };
   cancelRequest: { payload: CancelRequest; result: boolean };
   searchComponents: { payload: ComponentSearchRequest; result: ComponentSearchResult[] };
+  getRelationships: { payload: RelationshipsRequest; result: RelationshipsResult };
   openComponent: { payload: ComponentSearchResult; result: boolean };
 }
 

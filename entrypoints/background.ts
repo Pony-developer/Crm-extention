@@ -127,7 +127,7 @@ export default defineBackground(() => {
         return browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       });
     }
-    if (message.type === 'RUN_REQUEST' || message.type === 'CANCEL_REQUEST') {
+    if (message.type === 'RUN_REQUEST' || message.type === 'CANCEL_REQUEST' || message.type === 'GET_RELATIONSHIPS') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
         if (tab?.id == null) throw new Error('No active Dynamics tab');
         const target = await targetFor(tab.id);

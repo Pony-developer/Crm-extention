@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, Database, ExternalLink, RefreshCw, Search } from 'lucide-react';
-import type { CrmContext } from '../../shared/types';
+import type { CrmContext, RelationshipsResult, ToolMessage } from '../../shared/types';
 
 type Kind = '1:N' | 'N:1' | 'N:N';
 export type Relationship = { id: string; schemaName: string; kind: Kind; direction: 'outgoing' | 'incoming' | 'bidirectional'; referencedEntity: string; referencingEntity: string; relatedEntity: string };
@@ -17,46 +17,20 @@ async function loadRelationships(orgUrl: string, entity: string, force = false):
     const stored = (await browser.storage.local.get(key))[key] as CacheEntry | undefined;
     if (stored && Date.now() - stored.savedAt < CACHE_TTL) return stored.relationships;
   }
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error('Open a Dynamics 365 tab to load relationship metadata.');
-  const execution = await browser.scripting.executeScript({
-    target: { tabId: tab.id }, world: 'MAIN', args: [entity],
-    func: async logicalName => {
-      const headers = { Accept: 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' };
-      const root = `/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(logicalName)}')`;
-      const readAll = async (path: string) => {
-        const values: Record<string, string>[] = [];
-        let next: string | undefined = path;
-        while (next) {
-          const response = await fetch(next, { headers });
-          if (!response.ok) return { ok: false as const, status: response.status, message: (await response.text()).slice(0, 500) || response.statusText };
-          const json = await response.json(); values.push(...(json.value || [])); next = json['@odata.nextLink'];
-        }
-        return { ok: true as const, values };
-      };
-      const [oneToMany, manyToOne, manyToMany] = await Promise.all([
-        readAll(`${root}/OneToManyRelationships?$select=MetadataId,SchemaName,ReferencedEntity,ReferencingEntity`),
-        readAll(`${root}/ManyToOneRelationships?$select=MetadataId,SchemaName,ReferencedEntity,ReferencingEntity`),
-        readAll(`${root}/ManyToManyRelationships?$select=MetadataId,SchemaName,Entity1LogicalName,Entity2LogicalName`),
-      ]);
-      return { oneToMany, manyToOne, manyToMany };
-    },
-  });
-  const result = execution[0]?.result;
-  if (!result) throw new Error('Dynamics did not return relationship metadata. Verify that the active tab belongs to this organization.');
-  const failure = [result.oneToMany, result.manyToOne, result.manyToMany].find(value => !value.ok);
-  if (failure && !failure.ok) {
-    if (failure.status === 401 || failure.status === 403) throw new Error(`Insufficient privileges (${failure.status}). Read EntityDefinition and relationship metadata privileges are required.`);
-    throw new Error(`Relationship metadata request failed (${failure.status}): ${failure.message}`);
+  const result = await browser.runtime.sendMessage({ type: 'GET_RELATIONSHIPS', request: { logicalName: entity } } satisfies ToolMessage) as RelationshipsResult;
+  if (!result?.ok) {
+    const error = result?.error ?? { message: 'Dynamics did not return relationship metadata. Verify that the active tab belongs to this organization.' };
+    if (error.status === 401 || error.status === 403) throw new Error(`Insufficient privileges (${error.status}). Read EntityDefinition and relationship metadata privileges are required.`);
+    throw new Error(`${error.message}${error.status ? ` (${error.status})` : ''}`);
   }
   const map = new Map<string, Relationship>();
-  const add = (raw: Record<string, string>, kind: Kind, direction: Relationship['direction'], referenced: string, referencing: string, related: string) => {
+  const add = (raw: { MetadataId?: string; SchemaName?: string }, kind: Kind, direction: Relationship['direction'], referenced: string, referencing: string, related: string) => {
     const id = raw.MetadataId || `${kind}:${raw.SchemaName}:${related}`;
     map.set(id, { id, schemaName: raw.SchemaName || '(unnamed relationship)', kind, direction, referencedEntity: referenced, referencingEntity: referencing, relatedEntity: related });
   };
-  for (const raw of result.oneToMany.values || []) add(raw, '1:N', 'outgoing', raw.ReferencedEntity || entity, raw.ReferencingEntity || 'unknown', raw.ReferencingEntity || 'unknown');
-  for (const raw of result.manyToOne.values || []) add(raw, 'N:1', 'incoming', raw.ReferencedEntity || 'unknown', raw.ReferencingEntity || entity, raw.ReferencedEntity || 'unknown');
-  for (const raw of result.manyToMany.values || []) {
+  for (const raw of result.data.oneToMany) add(raw, '1:N', 'outgoing', raw.ReferencedEntity || entity, raw.ReferencingEntity || 'unknown', raw.ReferencingEntity || 'unknown');
+  for (const raw of result.data.manyToOne) add(raw, 'N:1', 'incoming', raw.ReferencedEntity || 'unknown', raw.ReferencingEntity || entity, raw.ReferencedEntity || 'unknown');
+  for (const raw of result.data.manyToMany) {
     const related = raw.Entity1LogicalName === entity ? raw.Entity2LogicalName : raw.Entity1LogicalName;
     add(raw, 'N:N', 'bidirectional', raw.Entity1LogicalName || entity, raw.Entity2LogicalName || 'unknown', related || 'unknown');
   }
