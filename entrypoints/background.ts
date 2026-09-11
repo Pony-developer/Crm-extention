@@ -6,6 +6,7 @@ export default defineBackground(() => {
   browser.runtime.onMessage.addListener((message: ToolMessage, sender) => {
     if (message.type === 'REGISTER_CONTEXT' && sender.tab?.id != null) {
       contexts.set(sender.tab.id, { frameId: sender.frameId ?? 0, context: message.context });
+      void browser.runtime.sendMessage({ type: 'ACTIVE_CONTEXT_CHANGED', context: message.context } satisfies ToolMessage).catch(() => undefined);
       return Promise.resolve({ ok: true });
     }
     if (message.type === 'GET_ACTIVE_CONTEXT') {
