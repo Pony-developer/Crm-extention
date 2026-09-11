@@ -1,4 +1,5 @@
 import type { ComponentSearchResult, PageBridgeRequest, PageBridgeResponse, RelationshipsError, RelationshipsMetadata, RelationshipsResult, WebApiMethod } from '../shared/types';
+import { installPerformanceMonitor } from '../shared/performance';
 
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
 export default defineContentScript({
@@ -17,6 +18,7 @@ export default defineContentScript({
     let handshakeComplete = false;
     let subscriptionKey = '';
     let unsubscribe: (() => void) | undefined;
+    let teardownPerformanceMonitor: (() => void) | undefined;
     const xrm = () => (window as typeof window & { Xrm?: any }).Xrm;
     const guid = (value?: string) => value?.replace(/[{}]/g, '').toLowerCase();
     const odataString = (value: string) => value.replace(/'/g, "''");
@@ -70,8 +72,17 @@ export default defineContentScript({
     const postEvent = (event: string, payload?: unknown) => window.postMessage({ channel: CHANNEL, direction: 'event', event, payload }, window.location.origin);
     function fieldState(attribute: any) { return { name: attribute.getName(), dirty: Boolean(attribute.getIsDirty?.()), value: attribute.getValue?.() }; }
     function subscribe(page: any) {
-      const entity = page?.data?.entity; const key = `${entity?.getEntityName?.() ?? ''}:${guid(entity?.getId?.()) ?? ''}`;
-      if (!entity || key === subscriptionKey) return; unsubscribe?.(); subscriptionKey = key; const removers: Array<() => void> = [];
+      const entity = page?.data?.entity;
+      const formId = guid(page?.ui?.formSelector?.getCurrentItem?.()?.getId?.());
+      const key = `${entity?.getEntityName?.() ?? ''}:${guid(entity?.getId?.()) ?? ''}:${formId ?? ''}`;
+      if (key === subscriptionKey) return;
+      unsubscribe?.();
+      teardownPerformanceMonitor?.();
+      subscriptionKey = '';
+      if (!entity) return;
+      subscriptionKey = key;
+      teardownPerformanceMonitor = installPerformanceMonitor(page, snapshot => window.postMessage({ channel: CHANNEL, direction: 'performance', snapshot }, window.location.origin));
+      const removers: Array<() => void> = [];
       entity.attributes?.forEach((attribute: any) => { const handler = () => postEvent('attribute-change', fieldState(attribute)); attribute.addOnChange?.(handler); removers.push(() => attribute.removeOnChange?.(handler)); });
       const publishAll = (reason: string) => { const fields: unknown[] = []; entity.attributes?.forEach((attribute: any) => fields.push(fieldState(attribute))); postEvent('fields-state', { reason, fields }); };
       const onSave = () => window.setTimeout(() => publishAll('save-complete'), 750); const onPostSave = () => publishAll('save-complete'); const onLoad = () => publishAll('form-load');
@@ -231,7 +242,7 @@ export default defineContentScript({
     }
     const bridgeWindow = window as typeof window & { __dynamicsToolkitTeardown?: () => void };
     bridgeWindow.__dynamicsToolkitTeardown?.();
-    const teardown = () => { window.removeEventListener('message', onMessage); window.removeEventListener('pagehide', teardown); unsubscribe?.(); requests.forEach(controller => controller.abort()); requests.clear(); usedRequestIds.clear(); sessionToken = undefined; handshakeComplete = false; delete bridgeWindow.__dynamicsToolkitTeardown; };
+    const teardown = () => { window.removeEventListener('message', onMessage); window.removeEventListener('pagehide', teardown); unsubscribe?.(); teardownPerformanceMonitor?.(); requests.forEach(controller => controller.abort()); requests.clear(); usedRequestIds.clear(); sessionToken = undefined; handshakeComplete = false; delete bridgeWindow.__dynamicsToolkitTeardown; };
     bridgeWindow.__dynamicsToolkitTeardown = teardown;
     window.addEventListener('message', onMessage);
     window.addEventListener('pagehide', teardown, { once: true });
