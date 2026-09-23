@@ -7,6 +7,7 @@ const STORAGE_KEY = 'reproRecorderSteps';
 
 export function Recorder({ context, onClose }: { context: CrmContext; onClose: () => void }) {
   const [steps, setSteps] = useState<RecordedStep[]>([]);
+  const [stepsLoaded, setStepsLoaded] = useState(false);
   const [selected, setSelected] = useState(0);
   const [tool, setTool] = useState<Tool>('arrow');
   const [notice, setNotice] = useState('');
@@ -15,8 +16,16 @@ export function Recorder({ context, onClose }: { context: CrmContext; onClose: (
   const draft = useRef<{ x: number; y: number } | undefined>(undefined);
   const step = steps[selected];
 
-  useEffect(() => { browser.storage.local.get(STORAGE_KEY).then(v => setSteps((v[STORAGE_KEY] as RecordedStep[]) || [])); }, []);
-  useEffect(() => { void browser.storage.local.set({ [STORAGE_KEY]: steps }); }, [steps]);
+  useEffect(() => {
+    void browser.storage.local.get(STORAGE_KEY).then(v => {
+      setSteps((v[STORAGE_KEY] as RecordedStep[]) || []);
+      setStepsLoaded(true);
+    }).catch(error => setNotice(`Не удалось загрузить шаги: ${String(error)}`));
+  }, []);
+  useEffect(() => {
+    if (!stepsLoaded) return;
+    void browser.storage.local.set({ [STORAGE_KEY]: steps }).catch(error => setNotice(`Не удалось сохранить шаги: ${String(error)}`));
+  }, [steps, stepsLoaded]);
   useEffect(() => {
     const el = canvas.current;
     if (!el || !step?.screenshot) return;
@@ -71,9 +80,9 @@ export function Recorder({ context, onClose }: { context: CrmContext; onClose: (
     }
   };
 
-  return <div className="recorder"><div className="recorder-head"><button className="back" onClick={onClose}><ChevronLeft/>Tools</button><div><b>Запись шагов</b><span>{steps.length} шагов</span></div><button className="primary" onClick={add}><Plus/>Шаг</button></div>
+  return <div className="recorder"><div className="recorder-head"><button className="back" onClick={onClose}><ChevronLeft/>Tools</button><div><b>Запись шагов</b><span>{steps.length} шагов</span></div><button className="primary" onClick={add} disabled={!stepsLoaded}><Plus/>Шаг</button></div>
     <div className="privacy"><EyeOff/><span><b>Перед отправкой проверьте персональные данные</b>Расширение не записывает ввод, пароли и содержимое полей. Описание добавляется только вами.</span></div>
-    {!step ? <div className="recorder-empty"><Camera/><b>Начните запись воспроизведения</b><span>Добавьте шаг и при необходимости прикрепите снимок видимой части вкладки.</span><button className="primary" onClick={add}><Plus/>Добавить первый шаг</button></div> : <>
+    {!step ? <div className="recorder-empty"><Camera/><b>Начните запись воспроизведения</b><span>Добавьте шаг и при необходимости прикрепите снимок видимой части вкладки.</span><button className="primary" onClick={add} disabled={!stepsLoaded}><Plus/>Добавить первый шаг</button></div> : <>
       <div className="step-strip">{steps.map((s,i)=><button className={i===selected?'selected':''} onClick={()=>setSelected(i)} key={s.id}>{i+1}<span>{s.screenshot?'●':''}</span></button>)}</div>
       <textarea aria-label="Описание шага" placeholder="Опишите действие и ожидаемый результат…" value={step.description} onChange={e=>update({description:e.target.value})}/>
       <div className="step-meta"><span>{step.context.entityName||'Без сущности'} · {step.context.formName||'Без формы'}</span><time>{new Date(step.timestamp).toLocaleTimeString()}</time></div>

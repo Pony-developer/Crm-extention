@@ -65,8 +65,13 @@ export function RelationshipsView({ context, onOpenMetadata }: { context: CrmCon
     if (expanded[key]) { setExpanded(value => ({ ...value, [key]: false })); return; }
     setExpanded(value => ({ ...value, [key]: true }));
     if (branch.depth >= depth || children[key] || !orgUrl) return;
+    setError('');
     try { setChildren(value => ({ ...value, [key]: [] })); const data = await loadRelationships(orgUrl, branch.entity); setChildren(value => ({ ...value, [key]: data })); }
-    catch (reason) { setExpanded(value => ({ ...value, [key]: false })); setError(reason instanceof Error ? reason.message : String(reason)); }
+    catch (reason) {
+      setChildren(value => { const next = { ...value }; delete next[key]; return next; });
+      setExpanded(value => ({ ...value, [key]: false }));
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
   };
   const renderBranch = (branch: Branch, relationships: Relationship[]): React.ReactNode => {
     const key = `${branch.depth}:${branch.entity}`; const open = expanded[key];

@@ -45,6 +45,9 @@ function isCachedContext(value: unknown): value is CachedContext {
 export default defineBackground(() => {
   const contexts = new Map<number, CachedContext>();
   const performance = new Map<number, PerformanceSnapshot>();
+  const requestRoutes = new Map<string, { tabId: number; frameId: number }>();
+  const pendingRequests = new Set<string>();
+  const cancelledBeforeDispatch = new Set<string>();
 
   async function forgetTarget(tabId: number) {
     contexts.delete(tabId);
@@ -102,7 +105,11 @@ export default defineBackground(() => {
       // part of FrameRegistration, so page-controlled message data cannot spoof it.
       const incoming: CachedContext = { frameId: sender.frameId ?? 0, ...message.frame, context: message.context };
       const current = contexts.get(tabId);
-      if (!current || (current.frameId === incoming.frameId && incoming.timestamp >= current.timestamp) || quality(incoming) > quality(current)) {
+      // Registrations happen when a form context changes. A newer form must
+      // replace an older frame even when it exposes fewer context fields.
+      if (!current || incoming.timestamp > current.timestamp
+        || (incoming.timestamp === current.timestamp
+          && (current.frameId === incoming.frameId || quality(incoming) > quality(current)))) {
         contexts.set(tabId, incoming);
         void rememberTarget(tabId, incoming);
       }
@@ -118,7 +125,7 @@ export default defineBackground(() => {
         if (tab?.id == null) return undefined;
         const target = await targetFor(tab.id);
         return browser.tabs.sendMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined)
-          .catch(() => target?.context);
+          .catch(() => undefined);
       });
     }
     if (message.type === 'CAPTURE_VISIBLE_TAB') {
@@ -127,7 +134,40 @@ export default defineBackground(() => {
         return browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       });
     }
-    if (message.type === 'RUN_REQUEST' || message.type === 'CANCEL_REQUEST' || message.type === 'GET_RELATIONSHIPS' || message.type === 'OPEN_COMPONENT') {
+    if (message.type === 'RUN_REQUEST') {
+      const requestId = message.request.requestId;
+      pendingRequests.add(requestId);
+      return browser.tabs.get(message.targetTabId).then(async tab => {
+        if (!tab.active || tab.id == null) throw new Error('The active Dynamics tab changed. Reopen the Toolkit before running this request.');
+        const target = await targetFor(tab.id);
+        if (!target) throw new Error('Dynamics bridge is not connected to the selected tab');
+        const context = await browser.tabs.sendMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, { frameId: target.frameId }).catch(() => undefined);
+        if (!isRecordContext(context)
+          || context.orgUrl !== message.expectedContext.orgUrl
+          || context.entityName !== message.expectedContext.entityName
+          || context.recordId !== message.expectedContext.recordId) {
+          throw new Error('The Dynamics record changed. Reopen the Toolkit before running this request.');
+        }
+        if (cancelledBeforeDispatch.has(requestId)) throw new Error('Request cancelled.');
+        const route = { tabId: tab.id, frameId: target.frameId };
+        requestRoutes.set(requestId, route);
+        return browser.tabs.sendMessage(tab.id, message, { frameId: target.frameId });
+      }).finally(() => {
+        pendingRequests.delete(requestId);
+        cancelledBeforeDispatch.delete(requestId);
+        requestRoutes.delete(requestId);
+      });
+    }
+    if (message.type === 'CANCEL_REQUEST') {
+      const route = requestRoutes.get(message.requestId);
+      if (route) return browser.tabs.sendMessage(route.tabId, message, { frameId: route.frameId }).catch(() => false);
+      if (pendingRequests.has(message.requestId)) {
+        cancelledBeforeDispatch.add(message.requestId);
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(false);
+    }
+    if (message.type === 'GET_RELATIONSHIPS' || message.type === 'OPEN_COMPONENT') {
       return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
         if (tab?.id == null) throw new Error('No active Dynamics tab');
         const target = await targetFor(tab.id);

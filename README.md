@@ -48,6 +48,14 @@ SDK message processing steps, and workflows); results the user cannot read may b
 fail. The trace viewer requires organization-level plug-in tracing to be enabled and `Read` access to Plug-in
 Trace Log records. Opening a result also remains subject to Dynamics security roles and app access.
 
+### Request history
+
+The Web API console stores request paths and response status codes locally. Saving request bodies and non-sensitive
+header values is optional and off by default. Header names containing authentication, token, key,
+secret, cookie, or session terms have their values removed from history even when the option is on.
+Review paths and bodies for private data before enabling local payload history. The console checks the
+active tab and record again before executing a request; switch back to the intended record if it changed.
+
 ### Hover and the UCI DOM
 
 Field hover is not provided by an official Xrm hover API. It maps Xrm control names to current Unified

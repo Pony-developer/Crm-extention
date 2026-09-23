@@ -14,6 +14,7 @@ export default defineContentScript({
     const ACTIONS = new Set<PageBridgeRequest['action']>(['handshake', 'context', 'fields', 'request', 'cancelRequest', 'searchComponents', 'getRelationships', 'openComponent']);
     const usedRequestIds = new Set<string>();
     const requests = new Map<string, AbortController>();
+    const cancelledRequestIds = new Set<string>();
     let sessionToken: string | undefined;
     let handshakeComplete = false;
     let subscriptionKey = '';
@@ -125,8 +126,15 @@ export default defineContentScript({
           const requestId = typeof payload?.requestId === 'string' ? payload.requestId : '';
           if (!requestId) throw new Error('A non-empty request ID is required for cancellation');
           const controller = requests.get(requestId);
-          controller?.abort();
-          const result = requests.delete(requestId);
+          if (controller) {
+            controller.abort();
+            requests.delete(requestId);
+          } else {
+            // Stop may overtake the request while the background resolves its frame.
+            cancelledRequestIds.add(requestId);
+            window.setTimeout(() => cancelledRequestIds.delete(requestId), 120_000);
+          }
+          const result = true;
           return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
         }
 
@@ -187,11 +195,19 @@ export default defineContentScript({
           return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
         } else if (action === 'request') {
           if (!payload || typeof payload !== 'object') throw new Error('Invalid request payload');
+          const expected = payload.expectedContext;
+          if (!expected?.orgUrl || !expected.entityName || !expected.recordId
+            || Xrm.Utility.getGlobalContext().getClientUrl() !== expected.orgUrl
+            || entity?.getEntityName?.() !== expected.entityName
+            || guid(entity?.getId?.()) !== expected.recordId) {
+            throw new Error('The Dynamics record changed. Reopen the Toolkit before running this request.');
+          }
           const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
           const method = typeof payload.method === 'string' ? payload.method.toUpperCase() as WebApiMethod : '' as WebApiMethod;
           const path = typeof payload.path === 'string' ? payload.path : '';
           const body = typeof payload.body === 'string' ? payload.body : undefined;
           if (!requestId) throw new Error('A non-empty Dataverse request ID is required');
+          if (cancelledRequestIds.delete(requestId)) throw new Error('Request cancelled.');
           if (requests.has(requestId)) throw new Error('Dataverse request ID is already active');
           if (!METHODS.has(method)) throw new Error(`HTTP method is not allowed: ${method || '(missing)'}`);
           if (!path.startsWith('/api/data/') || path.startsWith('//') || path.includes('\\')) throw new Error('Only relative /api/data/ paths are allowed');

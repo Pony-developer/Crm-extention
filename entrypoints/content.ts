@@ -248,7 +248,15 @@ export default defineContentScript({
     const onPerformance = (event: MessageEvent<unknown>) => { const data = event.data as { channel?: string; direction?: string; snapshot?: PerformanceSnapshot }; if (event.source === window && data?.channel === CHANNEL && data.direction === 'performance' && data.snapshot) void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: data.snapshot } satisfies ToolMessage).catch(() => undefined); };
     const onRuntimeMessage = async (message: ToolMessage) => {
       if (message.type === 'GET_CONTEXT') return current?.context;
-      if (message.type === 'RUN_REQUEST') return bridge.call('request', message.request, 120_000);
+      if (message.type === 'RUN_REQUEST') {
+        try {
+          return await bridge.call('request', { ...message.request, expectedContext: message.expectedContext }, 120_000);
+        } catch (error) {
+          // A bridge timeout must not leave the page fetch running without a Stop route.
+          void bridge.call('cancelRequest', { requestId: message.request.requestId }).catch(() => undefined);
+          throw error;
+        }
+      }
       if (message.type === 'CANCEL_REQUEST') return bridge.call('cancelRequest', { requestId: message.requestId });
       if (message.type === 'GET_RELATIONSHIPS') return bridge.call('getRelationships', message.request, 120_000) satisfies Promise<RelationshipsResult>;
       if (message.type === 'OPEN_COMPONENT') return bridge.call('openComponent', message.component);

@@ -15,6 +15,12 @@ const tabs = [{id:'console',label:'API Console',icon:Terminal},{id:'traces',labe
 const bodyMethods: WebApiMethod[] = ['POST','PATCH','PUT'];
 const emptyHeader = (): WebApiHeader => ({name:'',value:''});
 const describeError = (error: unknown) => error instanceof Error ? error.message : String(error);
+const privateHeader = /auth|token|key|secret|cookie|session/i;
+const historyItem = (item: RequestHistoryItem, includePayload: boolean): RequestHistoryItem => ({
+  ...item,
+  body: includePayload ? item.body : undefined,
+  headers: (item.headers||[]).map(header => ({ name: header.name, value: includePayload && !privateHeader.test(header.name.trim()) ? header.value : '' })),
+});
 
 function App(){
  const [view,setView]=useState<View>('console'),[ctx,setCtx]=useState<CrmContext>({connected:false}),[contextState,setContextState]=useState<ContextState>('loading'),[method,setMethod]=useState<WebApiMethod>('GET');
@@ -27,16 +33,58 @@ function App(){
  const [performance,setPerformance]=useState<PerformanceSnapshot|null>(null);
  const [customCss,setCustomCss]=useState(''),[customCssEnabled,setCustomCssEnabled]=useState(false),[cssSaved,setCssSaved]=useState(false);
  const [environmentMenu,setEnvironmentMenu]=useState(false),[editingEnvironment,setEditingEnvironment]=useState<SavedEnvironment|null>(null),[switchingEnvironment,setSwitchingEnvironment]=useState<string|null>(null);
+ const [activeTabId,setActiveTabId]=useState<number|null>(null),[saveHistoryPayload,setSaveHistoryPayload]=useState(false);
  const requestId=useRef<string | undefined>(undefined);
- useEffect(()=>{const loadContext=async()=>{try{const [tab]=await browser.tabs.query({active:true,currentWindow:true});const hostname=tab?.url?new URL(tab.url).hostname:'';if(!hostname.endsWith('.dynamics.com')){setContextState('not-dynamics');return}const value=await browser.runtime.sendMessage({type:'GET_ACTIVE_CONTEXT'} satisfies ToolMessage) as CrmContext|undefined;if(!value?.connected){setContextState('bridge-error');return}setCtx(value);setContextState(value.entityName&&value.recordId?'connected-record':'connected-non-record')}catch{setContextState('bridge-error')}};void loadContext();browser.storage.local.get(['themeEnabled','customCssEnabled','customCss','environments','requestHistory']).then(x=>{setDark(Boolean(x.themeEnabled));setCustomCssEnabled(Boolean(x.customCssEnabled));setCustomCss(typeof x.customCss==='string'?x.customCss:'');setEnvironments((x.environments as SavedEnvironment[])||[]);setHistory((x.requestHistory as RequestHistoryItem[])||[])});},[]);
+ useEffect(()=>{
+   let generation=0;
+   let observedTabId:number|null=null;
+   const loadContext=async()=>{
+     const current=++generation;
+     setContextState('loading'); setCtx({connected:false}); setActiveTabId(null);
+     try{
+       const [tab]=await browser.tabs.query({active:true,currentWindow:true});
+       if(current!==generation)return;
+       observedTabId=tab?.id??null;
+       const hostname=tab?.url?new URL(tab.url).hostname:'';
+       if(!hostname.endsWith('.dynamics.com')){setContextState('not-dynamics');return}
+       const value=await browser.runtime.sendMessage({type:'GET_ACTIVE_CONTEXT'} satisfies ToolMessage) as CrmContext|undefined;
+       if(current!==generation)return;
+       const [verifiedTab]=await browser.tabs.query({active:true,currentWindow:true});
+       if(current!==generation)return;
+       if(verifiedTab?.id!==tab?.id){void loadContext();return}
+       if(!value?.connected){setContextState('bridge-error');return}
+       setActiveTabId(tab?.id??null);setCtx(value);
+       setContextState(value.entityName&&value.recordId?'connected-record':'connected-non-record');
+     }catch{if(current===generation)setContextState('bridge-error')}
+   };
+   const activated=()=>{void loadContext()};
+   const updated=(tabId:number,change:{status?:string})=>{
+     if(tabId!==observedTabId)return;
+     if(change.status==='loading'){generation++;setContextState('loading');setCtx({connected:false});setActiveTabId(null)}
+     else if(change.status==='complete')void loadContext();
+   };
+   void loadContext();browser.tabs.onActivated.addListener(activated);browser.tabs.onUpdated.addListener(updated);
+   void browser.storage.local.get(['themeEnabled','customCssEnabled','customCss','environments','requestHistory','historyPayloadsEnabled']).then(async x=>{
+     const includePayload=Boolean(x.historyPayloadsEnabled);
+     const stored=(x.requestHistory as RequestHistoryItem[]|undefined)||[];
+     const safe=stored.map(item=>historyItem(item,includePayload));
+     setDark(Boolean(x.themeEnabled));setCustomCssEnabled(Boolean(x.customCssEnabled));setCustomCss(typeof x.customCss==='string'?x.customCss:'');setEnvironments((x.environments as SavedEnvironment[])||[]);setHistory(safe);setSaveHistoryPayload(includePayload);
+     if(JSON.stringify(safe)!==JSON.stringify(stored))await browser.storage.local.set({requestHistory:safe}).catch(()=>setError('Saved request history could not be cleaned in local storage.'));
+   }).catch(()=>{});
+   return()=>{generation++;browser.tabs.onActivated.removeListener(activated);browser.tabs.onUpdated.removeListener(updated)};
+ },[]);
  useEffect(()=>{const receive=(message:ToolMessage)=>{if(message.type==='REGISTER_PERFORMANCE')setPerformance(message.snapshot)};browser.runtime.onMessage.addListener(receive);browser.runtime.sendMessage({type:'GET_ACTIVE_PERFORMANCE'} satisfies ToolMessage).then(value=>setPerformance((value as PerformanceSnapshot|undefined)||null)).catch(()=>{});return()=>browser.runtime.onMessage.removeListener(receive)},[]);
  const requestPath=useMemo(()=>{const [base,rawQuery='']=path.split('?',2);const params=new URLSearchParams(rawQuery);['$select','$filter','$expand','$orderby','$top','fetchXml'].forEach(key=>params.delete(key));if(fetchMode){if(fetchXml.trim())params.set('fetchXml',fetchXml.trim())}else{if(select.trim())params.set('$select',select.trim());if(filter.trim())params.set('$filter',filter.trim());if(expand.trim())params.set('$expand',expand.trim());if(orderby.trim())params.set('$orderby',orderby.trim());if(top.trim())params.set('$top',top.trim())}const query=params.toString();return `${base}${query?`?${query}`:''}`},[path,fetchMode,fetchXml,select,filter,expand,orderby,top]);
- const sendRequest=(request:WebApiRequest)=>browser.runtime.sendMessage({type:'RUN_REQUEST',request} satisfies ToolMessage) as Promise<WebApiResponse>;
- const saveHistory=async(item:RequestHistoryItem)=>{const next=[item,...history.filter(x=>x.id!==item.id)].slice(0,50);setHistory(next);await browser.storage.local.set({requestHistory:next})};
+ const sendRequest=(request:WebApiRequest)=>{
+   if(activeTabId===null||!ctx.orgUrl||!ctx.entityName||!ctx.recordId)return Promise.reject(new Error('Open a Dynamics record before running a request.'));
+   return browser.runtime.sendMessage({type:'RUN_REQUEST',request,targetTabId:activeTabId,expectedContext:{orgUrl:ctx.orgUrl,entityName:ctx.entityName,recordId:ctx.recordId}} satisfies ToolMessage) as Promise<WebApiResponse>;
+ };
+ const saveHistory=async(item:RequestHistoryItem)=>{const safe=historyItem(item,saveHistoryPayload);const next=[safe,...history.filter(x=>x.id!==item.id)].slice(0,50);setHistory(next);try{await browser.storage.local.set({requestHistory:next});return true}catch{return false}};
+ const toggleHistoryPayload=async(enabled:boolean)=>{const next=history.map(item=>historyItem(item,enabled));try{await browser.storage.local.set({historyPayloadsEnabled:enabled,requestHistory:next});setHistory(next);setSaveHistoryPayload(enabled)}catch{setError('History setting could not be saved in local storage.')}};
  const hasRecordContext=contextState==='connected-record';
  const hasDynamicsContext=hasRecordContext;
- const run=async()=>{if(!hasDynamicsContext)return;if(method==='DELETE'&&!window.confirm(`Delete using ${requestPath}? This action may be irreversible.`))return;setError('');setResponse('');setResponseMeta(null);if(bodyMethods.includes(method)){try{JSON.parse(body)}catch(e){setError(`Invalid JSON body: ${describeError(e)}`);return}}const id=crypto.randomUUID();requestId.current=id;setRunning(true);const cleanHeaders=headers.filter(x=>x.name.trim());const item:RequestHistoryItem={id,timestamp:Date.now(),method,path:requestPath,body:bodyMethods.includes(method)?body:undefined,headers:cleanHeaders};try{const out=await sendRequest({requestId:id,method,path:requestPath,body:bodyMethods.includes(method)?body:undefined,headers:cleanHeaders});setResponseMeta(out);if(out.body){try{setResponse(JSON.stringify(JSON.parse(out.body),null,2))}catch{setResponse(out.body)}}else setResponse('(empty response body)');await saveHistory({...item,status:out.status,statusText:out.statusText})}catch(e){const message=describeError(e);setError(message.includes('AbortError')||message.toLowerCase().includes('aborted')?'Request cancelled.':`Network request failed: ${message}`);await saveHistory(item)}finally{requestId.current=undefined;setRunning(false)}};
- const cancel=async()=>{if(!requestId.current)return;await browser.runtime.sendMessage({type:'CANCEL_REQUEST',requestId:requestId.current} satisfies ToolMessage).catch(()=>{});setError('Request cancelled.');setRunning(false)};
+ const run=async()=>{if(!hasDynamicsContext)return;if(method==='DELETE'&&!window.confirm(`Delete using ${requestPath}? This action may be irreversible.`))return;setError('');setResponse('');setResponseMeta(null);if(bodyMethods.includes(method)){try{JSON.parse(body)}catch(e){setError(`Invalid JSON body: ${describeError(e)}`);return}}const id=crypto.randomUUID();requestId.current=id;setRunning(true);const cleanHeaders=headers.filter(x=>x.name.trim());const item:RequestHistoryItem={id,timestamp:Date.now(),method,path:requestPath,body:bodyMethods.includes(method)?body:undefined,headers:cleanHeaders};try{const out=await sendRequest({requestId:id,method,path:requestPath,body:bodyMethods.includes(method)?body:undefined,headers:cleanHeaders});setResponseMeta(out);if(out.body){try{setResponse(JSON.stringify(JSON.parse(out.body),null,2))}catch{setResponse(out.body)}}else setResponse('(empty response body)');if(!await saveHistory({...item,status:out.status,statusText:out.statusText}))setError('Request completed, but its history could not be saved.')}catch(e){const message=describeError(e);setError(message.includes('AbortError')||message.toLowerCase().includes('aborted')?'Request cancelled.':`Request failed: ${message}`);await saveHistory(item)}finally{requestId.current=undefined;setRunning(false)}};
+ const cancel=async()=>{if(!requestId.current)return;const cancelled=await browser.runtime.sendMessage({type:'CANCEL_REQUEST',requestId:requestId.current} satisfies ToolMessage).catch(()=>false);if(cancelled)setError('Cancelling request…');else setError('This request could not be cancelled.')};
  const restore=(item:RequestHistoryItem)=>{const [base,query='']=item.path.split('?',2);const params=new URLSearchParams(query);const savedFetchXml=params.get('fetchXml');setMethod(item.method);setPath(base||'');setBody(item.body||'{\n  \n}');setHeaders(item.headers);setFetchMode(savedFetchXml!==null);setFetchXml(savedFetchXml||'');setSelect(params.get('$select')||'');setFilter(params.get('$filter')||'');setExpand(params.get('$expand')||'');setOrderby(params.get('$orderby')||'');setTop(params.get('$top')||'');setShowHistory(false)};
  const copy=()=>{if(!hasRecordContext)return;navigator.clipboard.writeText([ctx.recordId,ctx.entityName,ctx.formName].filter(Boolean).join('\n'));setCopied(true);setTimeout(()=>setCopied(false),1200)};
  const theme=async()=>{const next=!dark;setDark(next);await browser.storage.local.set({themeEnabled:next});await browser.runtime.sendMessage({type:'SET_THEME',enabled:next} satisfies ToolMessage).catch(()=>{})};
@@ -52,7 +100,7 @@ function App(){
  const targetUrl=(env:SavedEnvironment,includeRecord:boolean)=>{const target=new URL('/main.aspx',env.url);if(ctx.appId)target.searchParams.set('appid',ctx.appId);else if(ctx.appUniqueName)target.searchParams.set('appname',ctx.appUniqueName);if(ctx.entityName){target.searchParams.set('etn',ctx.entityName);target.searchParams.set('pagetype',includeRecord?'entityrecord':'entitylist')}if(includeRecord&&ctx.recordId)target.searchParams.set('id',ctx.recordId);return target.toString()};
  const openTarget=async(env:SavedEnvironment,includeRecord:boolean)=>{const [tab]=await browser.tabs.query({active:true,currentWindow:true});if(tab?.id!=null)await browser.tabs.update(tab.id,{url:targetUrl(env,includeRecord)})};
  const switchEnvironment=async(env:SavedEnvironment)=>{setEnvironmentMenu(false);setSwitchingEnvironment(env.id);try{if(!hasRecordContext||!ctx.entityName||!ctx.recordId){await openTarget(env,false);return}const logicalName=ctx.entityName.replaceAll("'","''");const metadataUrl=new URL(`/api/data/v9.2/EntityDefinitions(LogicalName='${logicalName}')`,env.url);metadataUrl.searchParams.set('$select','EntitySetName');const metadata=await fetch(metadataUrl,{credentials:'include',headers:{Accept:'application/json'}});if(metadata.status===401||metadata.status===403){if(window.confirm(`Sign in to ${env.name} before switching. Open it now?`))await openTarget(env,true);return}if(!metadata.ok)throw Error(`Could not resolve table metadata (${metadata.status} ${metadata.statusText}).`);const entitySetName=String((await metadata.json() as {EntitySetName?:string}).EntitySetName||'');if(!entitySetName)throw Error('The target organization did not return an entity set name.');const recordUrl=new URL(`/api/data/v9.2/${encodeURIComponent(entitySetName)}(${ctx.recordId.replace(/[{}]/g,'')})`,env.url);const record=await fetch(recordUrl,{credentials:'include',headers:{Accept:'application/json'}});if(record.status===401||record.status===403){if(window.confirm(`Sign in to ${env.name} before switching. Open it now?`))await openTarget(env,true);return}if(record.status===404){if(window.confirm('This record does not exist in the target organization. Open the table without a record ID?'))await openTarget(env,false);return}if(!record.ok)throw Error(`Could not verify the target record (${record.status} ${record.statusText}).`);await openTarget(env,true)}catch(e){window.alert(describeError(e))}finally{setSwitchingEnvironment(null)}};
- const openMetadata=(entity:string)=>{setPath(`/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(entity)}')`);setView('console')};
+ const openMetadata=(entity:string)=>{setPath(`/api/data/v9.2/EntityDefinitions(LogicalName='${encodeURIComponent(entity)}')`);setFetchMode(false);setSelect('');setFilter('');setExpand('');setOrderby('');setTop('');setView('console')};
  const performanceLabel=performance?.formLoadDuration!=null?`${(performance.formLoadDuration/1000).toFixed(2)} s`:'Not captured';
  const contextInfo:Record<ContextState,{title:string;message:string}>={
   loading:{title:'Connecting to Dynamics…',message:'Checking the active tab for a supported Dynamics record page.'},
@@ -72,12 +120,13 @@ function App(){
  ];
  useEffect(()=>{if(view==='traces'&&hasDynamicsContext&&!logs.length&&!traceLoading)void loadTraces()},[view]);
  if(view==='recorder')return <Recorder context={ctx} onClose={()=>setView('tools')}/>;
- return <div className="app"><header><div className="brand"><div className="logo"><Braces/></div><div><b>Dynamics Toolkit</b><span>Developer companion</span></div></div><div><button className="icon" onClick={theme}>{dark?<Moon/>:<Sun/>}</button><button className="icon" onClick={()=>setView('settings')}><Settings/></button></div></header>
+ return <div className="app"><header><div className="brand"><div className="logo"><Braces/></div><div><b>Dynamics Toolkit</b><span>Developer companion</span></div></div><div><button className="icon" aria-label={dark?'Disable Dynamics dark theme':'Enable Dynamics dark theme'} onClick={theme}>{dark?<Moon/>:<Sun/>}</button><button className="icon" aria-label="Open settings" onClick={()=>setView('settings')}><Settings/></button></div></header>
  <section className="environment-picker"><button className="environment" onClick={()=>setEnvironmentMenu(!environmentMenu)} aria-expanded={environmentMenu}><div className="env"><i/><div><span>CURRENT ENVIRONMENT</span><b>{ctx.orgName||'Dynamics 365'}</b></div><ChevronDown/></div><em>{environments.find(env=>env.url===ctx.orgUrl)?.kind||'ORG'}</em></button>{environmentMenu&&<div className="environment-menu">{environments.map(env=><button key={env.id} disabled={switchingEnvironment!==null} onClick={()=>switchEnvironment(env)}><i style={{background:env.color}}/><span><b>{env.name}</b><small>{new URL(env.url).hostname}</small></span><em>{switchingEnvironment===env.id?'Checking…':env.kind}</em></button>)}{!environments.length&&<div className="notice">Add an environment in Settings first.</div>}<button className="manage" onClick={()=>{setEnvironmentMenu(false);setView('settings')}}>Manage environments</button></div>}</section>
  <section className="record"><div className="record-icon"><Database/></div><div className="record-text"><span>{ctx.entityName||'No table'}</span><b>{ctx.recordName||contextInfo[contextState].title}</b><small>{ctx.recordId||'No active record'}</small></div><button onClick={copy} disabled={!hasRecordContext}><Copy/>{copied?'Copied':'Copy context'}</button></section>
  {!hasRecordContext&&<div className={`context-notice ${contextState}`} role={contextState==='bridge-error'?'alert':'status'}><b>{contextInfo[contextState].title}</b><span>{contextInfo[contextState].message}</span></div>}
- <nav>{tabs.map(t=><button key={t.id} className={view===t.id?'active':''} disabled={t.id==='traces'&&!hasDynamicsContext} onClick={()=>setView(t.id)}><t.icon/>{t.label}</button>)}</nav><main>
+ <nav aria-label="Main tools">{tabs.map(t=><button key={t.id} className={view===t.id?'active':''} aria-current={view===t.id?'page':undefined} disabled={t.id==='traces'&&!hasDynamicsContext} onClick={()=>setView(t.id)}><t.icon/>{t.label}</button>)}</nav><main>
  {view==='console'&&<><Title title="Web API Console" text="Run authenticated requests through the Dynamics bridge"><button className="sub" onClick={()=>setShowHistory(!showHistory)}><Clock3/>History ({history.length})</button></Title>
+ <label className="history-option"><input type="checkbox" checked={saveHistoryPayload} onChange={event=>void toggleHistoryPayload(event.target.checked)}/>Keep request bodies and non-sensitive header values in local history</label>
  {showHistory&&<div className="history">{history.length?history.map(item=><button key={item.id} onClick={()=>restore(item)}><b>{item.method}</b><span>{item.path}</span><em>{item.status?`${item.status} ${item.statusText}`:'Failed'} · {new Date(item.timestamp).toLocaleString()}</em></button>):<div className="notice">No requests yet.</div>}</div>}
  {!hasDynamicsContext&&<div className="notice">Web API requests require an active Dynamics 365 record page.</div>}<fieldset className="api-controls" disabled={!hasDynamicsContext}><div className="request"><select value={method} onChange={e=>setMethod(e.target.value as WebApiMethod)}>{['GET','POST','PATCH','PUT','DELETE'].map(x=><option key={x}>{x}</option>)}</select><input aria-label="Web API path" value={path} onChange={e=>setPath(e.target.value)}/>{running?<button className="cancel" onClick={cancel}><Square/>Stop</button>:<button onClick={run}><Play/>Run</button>}</div>
  <div className="builder"><div><label>QUERY BUILDER</label><button className={fetchMode?'active':''} onClick={()=>setFetchMode(!fetchMode)}><Code2/>{fetchMode?'OData mode':'FetchXML'}</button></div>{fetchMode?<textarea aria-label="FetchXML" value={fetchXml} onChange={e=>setFetchXml(e.target.value)}/>:<section className="query-fields">{[['$select',select,setSelect],['$filter',filter,setFilter],['$expand',expand,setExpand],['$orderby',orderby,setOrderby],['$top',top,setTop]].map(([label,value,setter])=><label key={label as string}><b>{label as string}</b><input value={value as string} onChange={e=>(setter as React.Dispatch<React.SetStateAction<string>>)(e.target.value)} placeholder={`Add ${String(label).slice(1)}`}/></label>)}</section>}<small className="resolved">{requestPath}</small></div>

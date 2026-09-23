@@ -5,7 +5,7 @@ export type ToolMessage =
   | { type: 'ACTIVE_CONTEXT_CHANGED'; context: CrmContext }
   | { type: 'GET_ACTIVE_CONTEXT' }
   | { type: 'GET_ACTIVE_PERFORMANCE' }
-  | { type: 'RUN_REQUEST'; request: WebApiRequest }
+  | { type: 'RUN_REQUEST'; request: WebApiRequest; targetTabId: number; expectedContext: RequestContext }
   | { type: 'CANCEL_REQUEST'; requestId: string }
   | { type: 'GET_RELATIONSHIPS'; request: RelationshipsRequest }
   | { type: 'TOGGLE_THEME'; enabled: boolean }
@@ -73,6 +73,8 @@ export interface CrmContext {
   appUniqueName?: string;
   pageUrl?: string;
 }
+
+export type RequestContext = Required<Pick<CrmContext, 'orgUrl' | 'entityName' | 'recordId'>>;
 
 export interface Annotation {
   id: string;
@@ -172,7 +174,7 @@ export interface PageBridgeActionMap {
   handshake: { payload: HandshakeRequest; result: HandshakeResponse };
   context: { payload: null; result: CrmContext };
   fields: { payload: null; result: FieldInfo[] };
-  request: { payload: WebApiRequest; result: WebApiResponse };
+  request: { payload: WebApiRequest & { expectedContext: RequestContext }; result: WebApiResponse };
   cancelRequest: { payload: CancelRequest; result: boolean };
   searchComponents: { payload: ComponentSearchRequest; result: ComponentSearchResult[] };
   getRelationships: { payload: RelationshipsRequest; result: RelationshipsResult };
