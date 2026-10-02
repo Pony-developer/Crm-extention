@@ -98,7 +98,7 @@ export interface RecordedStep {
   annotations: Annotation[];
 }
 
-export type ComponentType = 'table' | 'form' | 'view' | 'plugin-step' | 'cloud-flow';
+export type ComponentType = 'table' | 'form' | 'view' | 'plugin-step' | 'cloud-flow' | 'desktop-flow' | 'process-flow';
 
 export interface ComponentSearchResult {
   id: string;
@@ -118,6 +118,19 @@ export interface FieldInfo {
   required: string;
   dirty: boolean;
   controlNames: string[];
+}
+
+/** A tab, section or control of the open form, identified by the name used in form scripts. */
+export interface FormControlInfo {
+  name: string;
+  kind: 'tab' | 'section' | 'field' | 'control';
+  label?: string;
+  /** Raw Xrm control type (standard, lookup, subgrid, webresource, ...); empty for tabs and sections. */
+  controlType?: string;
+  /** Logical name of the bound attribute, when the control edits one. */
+  attribute?: string;
+  tab?: string;
+  section?: string;
 }
 
 export interface SavedEnvironment { id: string; name: string; url: string; kind: 'Dev' | 'Test' | 'Prod'; color: string; }
@@ -175,6 +188,7 @@ export interface PageBridgeActionMap {
   handshake: { payload: HandshakeRequest; result: HandshakeResponse };
   context: { payload: null; result: CrmContext };
   fields: { payload: null; result: FieldInfo[] };
+  controls: { payload: null; result: FormControlInfo[] };
   request: { payload: WebApiRequest & { expectedContext: RequestContext }; result: WebApiResponse };
   cancelRequest: { payload: CancelRequest; result: boolean };
   searchComponents: { payload: ComponentSearchRequest; result: ComponentSearchResult[] };

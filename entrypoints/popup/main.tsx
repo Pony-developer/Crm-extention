@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Activity, Check, ChevronDown, ChevronLeft, CircleDot, Clock3, Code2, Command, Copy, Database, ExternalLink, FileSearch, GitFork, Moon, Network, Play, Plus, RefreshCw, Search, Settings, Sparkles, Square, Sun, Terminal, Trash2, Zap } from 'lucide-react';
+import { Activity, Check, ChevronDown, ChevronLeft, CircleDot, Clock3, Code2, Command, Copy, Database, ExternalLink, FileSearch, GitFork, Moon, Network, Play, Plus, RefreshCw, Search, Settings, Sparkles, Square, Sun, Tags, Terminal, Trash2, Zap } from 'lucide-react';
 import type { CrmContext, PerformanceSnapshot, RequestHistoryItem, SavedEnvironment, ToolMessage, WebApiHeader, WebApiMethod, WebApiRequest, WebApiResponse } from '../../shared/types';
 import './style.css';
 import { sendRuntimeMessage } from '../../shared/messaging';
@@ -34,7 +34,7 @@ function App(){
  const [select,setSelect]=useState('name,revenue'),[filter,setFilter]=useState(''),[expand,setExpand]=useState(''),[orderby,setOrderby]=useState(''),[top,setTop]=useState('10');
  const [fetchMode,setFetchMode]=useState(false),[fetchXml,setFetchXml]=useState('<fetch top="10"><entity name="account"><attribute name="name" /></entity></fetch>');
  const [response,setResponse]=useState(''),[responseMeta,setResponseMeta]=useState<WebApiResponse|null>(null),[error,setError]=useState(''),[running,setRunning]=useState(false),[responseView,setResponseView]=useState<'json'|'table'>('json');
- const [history,setHistory]=useState<RequestHistoryItem[]>([]),[showHistory,setShowHistory]=useState(false),[dark,setDark]=useState(false),[copiedField,setCopiedField]=useState<string|null>(null),[showAllFields,setShowAllFields]=useState(false),[dirtyHighlight,setDirtyHighlight]=useState(true),[logs,setLogs]=useState<TraceLog[]>([]),[traceError,setTraceError]=useState(''),[traceLoading,setTraceLoading]=useState(false),[environments,setEnvironments]=useState<SavedEnvironment[]>([]);
+ const [history,setHistory]=useState<RequestHistoryItem[]>([]),[showHistory,setShowHistory]=useState(false),[dark,setDark]=useState(false),[copiedField,setCopiedField]=useState<string|null>(null),[showAllFields,setShowAllFields]=useState(false),[dirtyHighlight,setDirtyHighlight]=useState(true),[logicalNames,setLogicalNames]=useState(false),[logs,setLogs]=useState<TraceLog[]>([]),[traceError,setTraceError]=useState(''),[traceLoading,setTraceLoading]=useState(false),[environments,setEnvironments]=useState<SavedEnvironment[]>([]);
  const [traceSearch,setTraceSearch]=useState(''),[traceResult,setTraceResult]=useState<TraceResult>('all'),[traceMode,setTraceMode]=useState<TraceMode>('all'),[tracePeriod,setTracePeriod]=useState('7'),[tracePageSize,setTracePageSize]=useState(25),[expandedTrace,setExpandedTrace]=useState<string|null>(null),[copiedTrace,setCopiedTrace]=useState<string|null>(null);
  const [performance,setPerformance]=useState<PerformanceSnapshot|null>(null);
  const [customCss,setCustomCss]=useState(''),[customCssEnabled,setCustomCssEnabled]=useState(false),[cssSaved,setCssSaved]=useState(false);
@@ -72,7 +72,7 @@ function App(){
      else if(change.status==='complete')void loadContext();
    };
    void loadContext();browser.tabs.onActivated.addListener(activated);browser.tabs.onUpdated.addListener(updated);browser.runtime.onMessage.addListener(contextChanged);
-   void browser.storage.local.get(['themeEnabled','customCssEnabled','customCss','environments','requestHistory','historyPayloadsEnabled','dirtyHighlightEnabled']).then(async x=>{setDirtyHighlight(x.dirtyHighlightEnabled!==false);
+   void browser.storage.local.get(['themeEnabled','customCssEnabled','customCss','environments','requestHistory','historyPayloadsEnabled','dirtyHighlightEnabled','logicalNamesEnabled']).then(async x=>{setDirtyHighlight(x.dirtyHighlightEnabled!==false);setLogicalNames(x.logicalNamesEnabled===true);
      const includePayload=Boolean(x.historyPayloadsEnabled);
      const stored=(x.requestHistory as RequestHistoryItem[]|undefined)||[];
      const safe=stored.map(item=>historyItem(item,includePayload));
@@ -178,6 +178,7 @@ function App(){
  const tools:ToolConfig[]=[
   {icon:Command,title:'Command palette',description:'Jump to tables, views, forms and flows',badge:'⌘ ⇧ K',onClick:()=>{void sendRuntimeMessage<boolean>({type:'OPEN_PALETTE'} satisfies ToolMessage).then(opened=>{if(!opened)window.alert('The command palette could not be opened. Open a Dynamics record form and reload the tab if the problem continues.')}).catch(e=>window.alert(`The command palette could not be opened: ${describeError(e)}`))}},
   {icon:CircleDot,title:'Dirty fields',description:'Highlight values changed on this form',badge:dirtyHighlight?'On':'Off',onClick:()=>{const next=!dirtyHighlight;setDirtyHighlight(next);void browser.storage.local.set({dirtyHighlightEnabled:next})}},
+  {icon:Tags,title:'Logical names',description:'Show names of fields, tabs, sections and controls on the form',badge:logicalNames?'On':'Off',onClick:()=>{const next=!logicalNames;setLogicalNames(next);void browser.storage.local.set({logicalNamesEnabled:next})}},
   {icon:Activity,title:'Form performance',description:'Resources and execution timeline',badge:performanceLabel,target:'performance'},
   {icon:Network,title:'Relationship map',description:'Explore N:N and 1:N relationships',badge:'Open',target:'relationships',disabled:!hasRecordContext},
   {icon:GitFork,title:'Repro recorder',description:'Capture annotated steps for a ticket',badge:'Record',target:'recorder'},

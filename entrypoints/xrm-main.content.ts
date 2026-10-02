@@ -1,4 +1,4 @@
-import type { ComponentSearchResult, PageBridgeRequest, PageBridgeResponse, RelationshipsError, RelationshipsMetadata, RelationshipsResult, WebApiMethod } from '../shared/types';
+import type { ComponentSearchResult, FormControlInfo, PageBridgeRequest, PageBridgeResponse, RelationshipsError, RelationshipsMetadata, RelationshipsResult, WebApiMethod } from '../shared/types';
 import { installPerformanceMonitor } from '../shared/performance';
 
 /** Runs in the page's MAIN world so it can access the Dynamics Xrm runtime. */
@@ -11,7 +11,7 @@ export default defineContentScript({
     const CACHE_TTL = 24 * 60 * 60 * 1000;
     const MAX_BODY_BYTES = 1024 * 1024;
     const METHODS = new Set<WebApiMethod>(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']);
-    const ACTIONS = new Set<PageBridgeRequest['action']>(['handshake', 'context', 'fields', 'request', 'cancelRequest', 'searchComponents', 'getRelationships', 'openComponent']);
+    const ACTIONS = new Set<PageBridgeRequest['action']>(['handshake', 'context', 'fields', 'controls', 'request', 'cancelRequest', 'searchComponents', 'getRelationships', 'openComponent']);
     const usedRequestIds = new Set<string>();
     const requests = new Map<string, AbortController>();
     const cancelledRequestIds = new Set<string>();
@@ -200,6 +200,29 @@ export default defineContentScript({
             return { ...attribute, schema: item?.SchemaName ?? attribute.name, type: item?.AttributeType ?? attribute.type, required: item?.RequiredLevel?.Value ?? attribute.required };
           });
           return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
+        } else if (action === 'controls') {
+          const result: FormControlInfo[] = [];
+          const placement = new Map<string, { tab: string; section: string }>();
+          const text = (read: () => unknown) => { try { const value = read(); return typeof value === 'string' && value ? value : undefined; } catch { return undefined; } };
+          page?.ui?.tabs?.forEach((tab: any) => {
+            const tabName = text(() => tab.getName());
+            if (!tabName) return;
+            result.push({ name: tabName, kind: 'tab', label: text(() => tab.getLabel()) });
+            tab.sections?.forEach((section: any) => {
+              const sectionName = text(() => section.getName());
+              if (!sectionName) return;
+              result.push({ name: sectionName, kind: 'section', label: text(() => section.getLabel()), tab: tabName });
+              section.controls?.forEach((control: any) => { const name = text(() => control.getName()); if (name) placement.set(name, { tab: tabName, section: sectionName }); });
+            });
+          });
+          // ui.controls also holds the header and footer controls, which belong to no tab.
+          page?.ui?.controls?.forEach((control: any) => {
+            const name = text(() => control.getName());
+            if (!name) return;
+            const attribute = text(() => control.getAttribute?.()?.getName?.());
+            result.push({ name, kind: attribute ? 'field' : 'control', label: text(() => control.getLabel?.()), controlType: text(() => control.getControlType?.()), attribute, ...placement.get(name) });
+          });
+          return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
         } else if (action === 'request') {
           if (!payload || typeof payload !== 'object') throw new Error('Invalid request payload');
           const expected = payload.expectedContext;
@@ -249,15 +272,21 @@ export default defineContentScript({
             const take = Math.min(limit, 10);
             const api = '/api/data/v9.2';
             const filter = (field: string) => encodeURIComponent(`contains(${field},'${term}')`);
-            const [tables, forms, savedViews, personalViews, steps, flows] = await Promise.all([
-              getCollection(`${api}/EntityDefinitions?$select=MetadataId,LogicalName,SchemaName,DisplayName&$filter=${filter('LogicalName')}&$top=${take}`),
+            const settled = (await Promise.allSettled([
+              // Metadata queries reject $top (error 0x80060888), so the table list is trimmed after it arrives.
+              getCollection(`${api}/EntityDefinitions?$select=MetadataId,LogicalName,SchemaName,DisplayName&$filter=${filter('LogicalName')}`).then(rows => rows.slice(0, take)),
               getCollection(`${api}/systemforms?$select=formid,name,objecttypecode,type&$filter=${filter('name')}&$top=${take}`),
               getCollection(`${api}/savedqueries?$select=savedqueryid,name,returnedtypecode&$filter=${filter('name')}&$top=${take}`),
               getCollection(`${api}/userqueries?$select=userqueryid,name,returnedtypecode&$filter=${filter('name')}&$top=${take}`),
               getCollection(`${api}/sdkmessageprocessingsteps?$select=sdkmessageprocessingstepid,name,stage,mode&$filter=${filter('name')}&$top=${take}`),
-              getCollection(`${api}/workflows?$select=workflowid,name,statecode,statuscode&$filter=category%20eq%205%20and%20${filter('name')}&$top=${take}`),
-            ]);
+              // Power Automate items stored in Dataverse: cloud flows (5), desktop flows (6) and business process flows (4).
+              getCollection(`${api}/workflows?$select=workflowid,name,statecode,statuscode,category&$filter=(category%20eq%205%20or%20category%20eq%206%20or%20category%20eq%204)%20and%20${filter('name')}&$top=${take}`),
+            ]));
+            const failures = settled.filter(item => item.status === 'rejected');
+            if (failures.length === settled.length) throw (failures[0] as PromiseRejectedResult).reason;
+            const [tables = [], forms = [], savedViews = [], personalViews = [], steps = [], flows = []] = settled.map(item => (item.status === 'fulfilled' ? item.value : [])) as any[][];
             const clientUrl = Xrm.Utility.getGlobalContext().getClientUrl();
+            const environmentId: string | undefined = Xrm.Utility.getGlobalContext().organizationSettings?.bapEnvironmentId;
             const label = (item: any) => item.DisplayName?.UserLocalizedLabel?.Label || item.SchemaName || item.LogicalName;
             const matches: ComponentSearchResult[] = [
               ...tables.map(item => ({ id: guid(item.MetadataId)!, type: 'table' as const, name: label(item), subtitle: item.LogicalName, url: `${clientUrl}/tools/systemcustomization/Entities/EntityEditor.aspx?id=${guid(item.MetadataId)}` })),
@@ -265,7 +294,15 @@ export default defineContentScript({
               ...savedViews.map(item => ({ id: guid(item.savedqueryid)!, type: 'view' as const, name: item.name, subtitle: `System view · ${item.returnedtypecode ?? ''}`, entityName: 'savedquery' })),
               ...personalViews.map(item => ({ id: guid(item.userqueryid)!, type: 'view' as const, name: item.name, subtitle: `Personal view · ${item.returnedtypecode ?? ''}`, entityName: 'userquery' })),
               ...steps.map(item => ({ id: guid(item.sdkmessageprocessingstepid)!, type: 'plugin-step' as const, name: item.name, subtitle: `Stage ${item.stage} · ${item.mode === 0 ? 'Synchronous' : 'Asynchronous'}`, entityName: 'sdkmessageprocessingstep' })),
-              ...flows.map(item => ({ id: guid(item.workflowid)!, type: 'cloud-flow' as const, name: item.name, subtitle: item.statecode === 1 ? 'Activated' : 'Draft', entityName: 'workflow' })),
+              ...flows.map(item => ({
+                id: guid(item.workflowid)!,
+                type: (item.category === 6 ? 'desktop-flow' : item.category === 4 ? 'process-flow' : 'cloud-flow') as ComponentSearchResult['type'],
+                name: item.name,
+                subtitle: item.statecode === 1 ? 'Activated' : 'Draft',
+                entityName: 'workflow',
+                // Cloud flows open in Power Automate; without the environment id they fall back to the Dataverse record.
+                url: item.category === 5 && environmentId ? `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/flows/${guid(item.workflowid)}` : undefined,
+              })),
             ];
             result = matches.slice(0, limit);
           }

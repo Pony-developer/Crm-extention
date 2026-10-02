@@ -126,6 +126,8 @@ export default defineBackground(() => {
       // part of FrameRegistration, so page-controlled message data cannot spoof it.
       const incoming: CachedContext = { frameId: sender.frameId ?? 0, ...message.frame, context: message.context };
       const current = contexts.get(tabId);
+      // Embedded iframes can expose the same Xrm object. While the top frame owns the form, they never take over.
+      if (current?.frameId === 0 && incoming.frameId !== 0) return { ok: true };
       // Registrations happen when a form context changes. A newer form must
       // replace an older frame even when it exposes fewer context fields.
       if (!current || incoming.timestamp > current.timestamp

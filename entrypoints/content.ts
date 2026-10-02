@@ -2,6 +2,7 @@ import type {
   ComponentSearchResult,
   CrmContext,
   FieldInfo,
+  FormControlInfo,
   RelationshipsResult,
   AuthenticatedPageBridgeRequest,
   PageBridgeEvent,
@@ -96,6 +97,10 @@ const resultReaders: { [A in BridgeAction]: (response: PageBridgeResponse) => Br
     if ('result' in response && response.action === 'fields') return response.result;
     throw new Error('Bridge returned an invalid fields result');
   },
+  controls: response => {
+    if ('result' in response && response.action === 'controls') return response.result;
+    throw new Error('Bridge returned an invalid controls result');
+  },
   request: response => {
     if ('result' in response && response.action === 'request') return response.result;
     throw new Error('Bridge returned an invalid request result');
@@ -126,37 +131,33 @@ type PageBridge = ReturnType<typeof createPageBridge>;
 
 // Dirty-field highlighting is on unless the user switches it off in the side panel.
 let dirtyHighlightEnabled = true;
+// Logical-name badges are opt-in: they cover parts of the form.
+let logicalNamesEnabled = false;
 
-function installUi(context: CrmContext, initialFields: FieldInfo[], bridge: PageBridge) {
+function installUi(initialFields: FieldInfo[], initialControls: FormControlInfo[], bridge: PageBridge) {
   document.getElementById('dt-host')?.remove();
   const controller = new AbortController();
   const fields = new Map(initialFields.map(field => [field.name, { ...field }]));
   const decorated = new Map<HTMLElement, { field: string; enter: (event: PointerEvent) => void; leave: () => void }>();
   const host = document.createElement('div'); host.id = 'dt-host'; document.documentElement.append(host);
   const root = host.attachShadow({ mode: 'open' });
-  const infoRows = ([['Record ID', context.recordId], ['Entity', context.entityName], ['Record name', context.recordName], ['Form', context.formName], ['Form ID', context.formId], ['App', context.appUniqueName], ['App ID', context.appId]] as Array<[string, string | undefined]>)
-    .filter((row): row is [string, string] => Boolean(row[1]))
-    .map(([label, value]) => `<li><button class="row" type="button" data-copy="${escapeHtml(value)}" title="Copy ${escapeHtml(label)}"><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code><i>Copy</i></button></li>`).join('');
-  root.innerHTML = `<style>:host{all:initial}.dock{position:fixed;right:18px;bottom:18px;z-index:2147483647;display:flex;flex-direction:column;align-items:flex-end;gap:8px;font:13px Segoe UI,sans-serif;color:#fff}.logo{all:unset;box-sizing:border-box;width:30px;height:30px;border-radius:9px;cursor:pointer;display:block;opacity:.8;box-shadow:0 6px 16px #0005;transition:opacity .15s,transform .15s}.logo:hover,.logo[aria-expanded=true]{opacity:1;transform:scale(1.06)}.logo:focus-visible{outline:2px solid #bba7ff;outline-offset:2px}.logo svg{display:block;width:100%;height:100%}.card{display:none;box-sizing:border-box;width:min(400px,calc(100vw - 36px));background:#111927;border:1px solid #334155;border-radius:12px;padding:10px;box-shadow:0 12px 30px #0006}.card.open{display:block}.card header{padding:2px 4px 8px}.card header b,.card header small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card header small{color:#9ca7b8;font-size:11px;margin-top:2px}.info{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin:0;padding:0;list-style:none}.info li{min-width:0}.row{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:1px solid #26334a;border-radius:7px;background:#17202f;cursor:pointer}.row:hover{background:#202c40;border-color:#3a4a66}.row span{flex:0 0 74px;font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:#8795ab}.row code{flex:1;min-width:0;font:11px Consolas,monospace;color:#dbe4f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row i{font-style:normal;font-size:10px;color:#8d78e9}.toast,.tip{position:fixed;z-index:2147483647;background:#111927;color:#fff;border:1px solid #40506a;padding:9px 12px;border-radius:8px;font:12px Segoe UI;pointer-events:none}.toast{right:58px;bottom:20px;opacity:0;transition:.2s}.toast.on{opacity:1}.tip{display:none}.tip b,.tip span{display:block}.tip span{color:#aab6c9;margin-top:3px}.palette{display:none;position:fixed;inset:0;z-index:2147483646;background:#02061777;place-items:start center;padding-top:12vh;font:14px Segoe UI}.palette.open{display:grid}.panel{width:min(590px,88vw);border:1px solid #475569;background:#101827;border-radius:14px;color:white;overflow:hidden;box-shadow:0 24px 70px #0008}.search{display:flex;gap:12px;padding:17px;border-bottom:1px solid #263449}.search input{width:100%;background:none;border:0;outline:0;color:white;font-size:16px}.results{max-height:420px;overflow:auto;margin:0;padding:6px;list-style:none}.state{padding:16px;color:#aeb9ca}.item{display:flex;align-items:center;gap:12px;padding:11px;border-radius:8px;cursor:pointer}.item.selected,.item:hover{background:#27344a}.kind{font-size:10px;text-transform:uppercase;color:#bba7ff;background:#31265b;padding:4px 6px;border-radius:5px;white-space:nowrap}.item-text{min-width:0}.item b,.item small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.item small{color:#97a5ba;margin-top:3px}.dirty{outline:2px solid #f59e0b!important;outline-offset:2px}</style><div class="dock"><div class="card" role="dialog" aria-label="Dynamics record info"><header><b>${escapeHtml(context.recordName || context.entityDisplayName || context.entityName || 'Dynamics record')}</b><small>${escapeHtml(context.entityName ?? '')}</small></header><ul class="info">${infoRows}</ul></div><button class="logo" type="button" aria-expanded="false" aria-label="Dynamics Toolkit: show record info" title="Dynamics Toolkit"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-hidden="true"><defs><linearGradient id="dt-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9b79ff"/><stop offset="1" stop-color="#5c38cf"/></linearGradient></defs><rect x="2" y="2" width="124" height="124" rx="28" fill="url(#dt-bg)"/><path d="M48 34c-10 0-13 5-13 14v6c0 7-3 10-9 10 6 0 9 3 9 10v6c0 9 3 14 13 14" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/><path d="M80 34c10 0 13 5 13 14v6c0 7 3 10 9 10-6 0-9 3-9 10v6c0 9-3 14-13 14" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/><path d="M64 51v26" fill="none" stroke="#d5fff0" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="49" r="8" fill="#54dfa9"/><circle cx="64" cy="79" r="8" fill="#54dfa9"/></svg></button></div><div class="toast">Copied</div><div class="tip"></div><div class="palette" role="dialog" aria-label="Dynamics component search"><div class="panel"><div class="search"><span>⌘K</span><input aria-label="Search Dynamics components" autocomplete="off" placeholder="Search tables, forms, views, plugin steps and flows…"/></div><ul class="results" role="listbox"><li class="state">Type a component name to search in Dynamics</li></ul></div></div>`;
+  root.innerHTML = `<style>:host{all:initial}.dock{position:fixed;right:18px;bottom:18px;z-index:2147483647;display:flex;flex-direction:column;align-items:flex-end;gap:8px;font:13px Segoe UI,sans-serif;color:#fff}.logo{all:unset;box-sizing:border-box;width:30px;height:30px;border-radius:9px;cursor:pointer;display:block;opacity:.8;box-shadow:0 6px 16px #0005;transition:opacity .15s,transform .15s}.logo:hover{opacity:1;transform:scale(1.06)}.logo:focus-visible{outline:2px solid #bba7ff;outline-offset:2px}.logo svg{display:block;width:100%;height:100%}.toast,.tip{position:fixed;z-index:2147483647;background:#111927;color:#fff;border:1px solid #40506a;padding:9px 12px;border-radius:8px;font:12px Segoe UI;pointer-events:none}.toast{right:58px;bottom:20px;opacity:0;transition:.2s}.toast.on{opacity:1}.tip{display:none}.tip b,.tip span{display:block}.tip span{color:#aab6c9;margin-top:3px}.palette{display:none;position:fixed;inset:0;z-index:2147483646;background:#02061777;place-items:start center;padding-top:12vh;font:14px Segoe UI}.palette.open{display:grid}.panel{width:min(590px,88vw);border:1px solid #475569;background:#101827;border-radius:14px;color:white;overflow:hidden;box-shadow:0 24px 70px #0008}.search{display:flex;gap:12px;padding:17px;border-bottom:1px solid #263449}.search input{width:100%;background:none;border:0;outline:0;color:white;font-size:16px}.results{max-height:420px;overflow:auto;margin:0;padding:6px;list-style:none}.state{padding:16px;color:#aeb9ca}.item{display:flex;align-items:center;gap:12px;padding:11px;border-radius:8px;cursor:pointer}.item.selected,.item:hover{background:#27344a}.kind{font-size:10px;text-transform:uppercase;color:#bba7ff;background:#31265b;padding:4px 6px;border-radius:5px;white-space:nowrap}.item-text{min-width:0}.item b,.item small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.item small{color:#97a5ba;margin-top:3px}.dirty{outline:2px solid #f59e0b!important;outline-offset:2px}.names{position:fixed;inset:0;z-index:2147483645;pointer-events:none;overflow:hidden}.nm{all:unset;box-sizing:border-box;position:absolute;left:0;top:0;max-width:260px;padding:1px 5px;border-radius:4px;font:600 10px/14px Consolas,monospace;color:#fff;background:#6d4fd6;box-shadow:0 1px 4px #0006;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:copy;pointer-events:auto;opacity:.92}.nm:hover{opacity:1;z-index:1}.nm.tab{background:#0e7490}.nm.section{background:#15803d}.nm.control{background:#b45309}.nm em{font-style:normal;opacity:.7}</style><div class="names" aria-hidden="true"></div><div class="dock"><button class="logo" type="button" aria-label="Dynamics Toolkit: open command palette" title="Open command palette"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" aria-hidden="true"><defs><linearGradient id="dt-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9b79ff"/><stop offset="1" stop-color="#5c38cf"/></linearGradient></defs><rect x="2" y="2" width="124" height="124" rx="28" fill="url(#dt-bg)"/><path d="M48 34c-10 0-13 5-13 14v6c0 7-3 10-9 10 6 0 9 3 9 10v6c0 9 3 14 13 14" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/><path d="M80 34c10 0 13 5 13 14v6c0 7 3 10 9 10-6 0-9 3-9 10v6c0 9-3 14-13 14" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/><path d="M64 51v26" fill="none" stroke="#d5fff0" stroke-width="7" stroke-linecap="round"/><circle cx="64" cy="49" r="8" fill="#54dfa9"/><circle cx="64" cy="79" r="8" fill="#54dfa9"/></svg></button></div><div class="toast">Copied</div><div class="tip"></div><div class="palette" role="dialog" aria-label="Dynamics component search"><div class="panel"><div class="search"><span>⌘K</span><input aria-label="Search Dynamics components" autocomplete="off" placeholder="Search tables, forms, views, plugin steps and flows…"/></div><ul class="results" role="listbox"><li class="state">Type a component name to search in Dynamics</li></ul></div></div>`;
   const tip = root.querySelector<HTMLElement>('.tip')!;
   const palette = root.querySelector<HTMLElement>('.palette')!;
   const input = root.querySelector<HTMLInputElement>('.search input')!;
   const list = root.querySelector<HTMLUListElement>('.results')!;
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const card = root.querySelector<HTMLElement>('.card')!;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
   const logo = root.querySelector<HTMLButtonElement>('.logo')!;
   const toast = root.querySelector<HTMLElement>('.toast')!;
-  const setCard = (open: boolean) => { card.classList.toggle('open', open); logo.setAttribute('aria-expanded', String(open)); };
-  logo.addEventListener('click', () => setCard(!card.classList.contains('open')), { signal: controller.signal });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') setCard(false); }, { signal: controller.signal });
-  document.addEventListener('pointerdown', event => { if (!event.composedPath().includes(host)) setCard(false); }, { signal: controller.signal, capture: true });
-  card.addEventListener('click', async event => {
+  const openPalette = () => { palette.classList.add('open'); input.focus(); };
+  logo.addEventListener('click', openPalette, { signal: controller.signal });
+  const copyFrom = async (event: Event) => {
     const row = (event.target as Element).closest<HTMLElement>('[data-copy]');
     if (!row) return;
     await navigator.clipboard.writeText(row.dataset.copy ?? '');
     toast.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('on'), 1200);
-  }, { signal: controller.signal });
+  };
 
   const positionTip = (event: PointerEvent) => {
     const bounds = tip.getBoundingClientRect();
@@ -178,6 +179,74 @@ function installUi(context: CrmContext, initialFields: FieldInfo[], bridge: Page
     }
     return nodes;
   };
+  // Logical-name badges: one pill per tab, section and control, anchored to the element that Dynamics renders for it.
+  let controlList = initialControls;
+  const namesLayer = root.querySelector<HTMLElement>('.names')!;
+  namesLayer.addEventListener('click', copyFrom, { signal: controller.signal });
+  const badges = new Map<string, HTMLButtonElement>();
+  let namesFrame = 0;
+  const attrValue = (value: string) => CSS.escape(value);
+  const targetSelectors = (info: FormControlInfo) => {
+    const name = attrValue(info.name);
+    const byId = `[data-id="${name}"]`;
+    const row = `[data-id="${name}-FieldSectionItemContainer"]`;
+    const named = `[data-control-name="${name}"]`;
+    const control = `[data-id^="${name}.fieldControl"]`;
+    if (info.kind === 'tab') return [`[data-id="tablist-${name}"]`, `[data-id="tabpanel-${name}"]`, byId];
+    if (info.kind === 'section') return [`section${byId}`, byId, `[data-id="section-${name}"]`];
+    return [row, named, byId, control, `[data-lp-id$="|${name}"]`];
+  };
+  const isVisible = (node: HTMLElement) => node.offsetWidth > 0 || node.offsetHeight > 0;
+  const renderNames = () => {
+    namesFrame = 0;
+    if (!logicalNamesEnabled) { if (badges.size) { namesLayer.replaceChildren(); badges.clear(); } return; }
+    const live = new Set<string>();
+    const claimed = new Set<Element>();
+    for (const info of controlList) {
+      let nodes: HTMLElement[] = [];
+      for (const selector of targetSelectors(info)) {
+        nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(isVisible);
+        if (nodes.length) break;
+      }
+      nodes.forEach((node, index) => {
+        if (claimed.has(node)) return;
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 16 || rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return;
+        const alignLeft = info.kind === 'tab';
+        const x = alignLeft ? rect.left + 4 : rect.right - 4;
+        // A node scrolled underneath the command bar or another panel must not leave a badge floating over it.
+        const hit = document.elementFromPoint(Math.min(Math.max(alignLeft ? x + 4 : x - 4, 0), innerWidth - 1), Math.min(Math.max(rect.top + 3, 0), innerHeight - 1));
+        if (hit && hit !== host && !node.contains(hit)) return;
+        claimed.add(node);
+        const key = `${info.kind}:${info.name}:${index}`;
+        live.add(key);
+        let badge = badges.get(key);
+        const shown = info.kind === 'field' && info.attribute ? info.attribute : info.name;
+        const suffix = info.kind === 'field' && info.attribute && info.attribute !== info.name ? info.name : '';
+        if (!badge) {
+          badge = document.createElement('button');
+          badge.type = 'button';
+          badges.set(key, badge);
+          namesLayer.append(badge);
+        }
+        if (badge.dataset.shown !== `${shown}|${suffix}|${info.kind}`) {
+          badge.dataset.shown = `${shown}|${suffix}|${info.kind}`;
+          badge.className = `nm ${info.kind}`;
+          badge.dataset.copy = shown;
+          badge.textContent = shown;
+          if (suffix) { const extra = document.createElement('em'); extra.textContent = ` (${suffix})`; badge.append(extra); }
+          badge.title = [`${info.kind}${info.controlType ? ` · ${info.controlType}` : ''}`, info.label, info.section && `section: ${info.section}`, info.tab && `tab: ${info.tab}`, 'Click to copy'].filter(Boolean).join('\n');
+        }
+        badge.style.transform = `translate(${Math.round(x)}px, ${Math.round(rect.top)}px) ${alignLeft ? 'translateY(-50%)' : 'translate(-100%, -50%)'}`;
+      });
+    }
+    for (const [key, badge] of badges) if (!live.has(key)) { badge.remove(); badges.delete(key); }
+  };
+  const scheduleNames = () => { if (!namesFrame && (logicalNamesEnabled || badges.size)) namesFrame = requestAnimationFrame(renderNames); };
+  document.addEventListener('scroll', scheduleNames, { capture: true, passive: true, signal: controller.signal });
+  window.addEventListener('resize', scheduleNames, { signal: controller.signal });
+  // Layout can shift without any DOM mutation (animations, collapsing panels), so re-anchor while the badges are on.
+  const namesTimer = window.setInterval(scheduleNames, 500);
   const updateMarks = () => {
     for (const [node, binding] of decorated) {
       const dirty = dirtyHighlightEnabled && fields.get(binding.field)?.dirty;
@@ -196,6 +265,7 @@ function installUi(context: CrmContext, initialFields: FieldInfo[], bridge: Page
     }
     for (const [node, binding] of decorated) if (!node.isConnected) { node.removeEventListener('pointerenter', binding.enter); node.removeEventListener('pointermove', positionTip); node.removeEventListener('pointerleave', binding.leave); decorated.delete(node); }
     updateMarks();
+    scheduleNames();
   };
   const observer = new MutationObserver(scan);
   observer.observe(document.documentElement, { childList: true, subtree: true }); scan();
@@ -217,10 +287,12 @@ function installUi(context: CrmContext, initialFields: FieldInfo[], bridge: Page
   list.addEventListener('click', event => { const row = (event.target as Element).closest<HTMLElement>('[data-index]'); if (row) void open(Number(row.dataset.index)); }, { signal: controller.signal });
   palette.addEventListener('mousedown', event => { if (event.target === palette) palette.classList.remove('open'); }, { signal: controller.signal });
 
-  const cleanup = () => { observer.disconnect(); controller.abort(); clearTimeout(debounceTimer); clearTimeout(toastTimer); for (const [node, binding] of decorated) { node.removeEventListener('pointerenter', binding.enter); node.removeEventListener('pointermove', positionTip); node.removeEventListener('pointerleave', binding.leave); node.style.outline = ''; node.style.outlineOffset = ''; } decorated.clear(); host.remove(); };
+  const cleanup = () => { observer.disconnect(); controller.abort(); clearInterval(namesTimer); cancelAnimationFrame(namesFrame); clearTimeout(debounceTimer); clearTimeout(toastTimer); for (const [node, binding] of decorated) { node.removeEventListener('pointerenter', binding.enter); node.removeEventListener('pointermove', positionTip); node.removeEventListener('pointerleave', binding.leave); node.style.outline = ''; node.style.outlineOffset = ''; } decorated.clear(); host.remove(); };
   return {
     root, palette, cleanup,
     refreshMarks: updateMarks,
+    refreshNames() { cancelAnimationFrame(namesFrame); namesFrame = requestAnimationFrame(renderNames); },
+    applyControls(next: FormControlInfo[]) { controlList = next; scheduleNames(); },
     updateField(name: string, dirty: boolean) { const field = fields.get(name); if (field) field.dirty = dirty; updateMarks(); },
     applyFields(nextFields: FieldInfo[]) { fields.clear(); nextFields.forEach(field => fields.set(field.name, { ...field })); scan(); },
     updateFields(states: Array<{ name: string; dirty: boolean }>) { states.forEach(state => { const field = fields.get(state.name); if (field) field.dirty = state.dirty; }); updateMarks(); },
@@ -244,11 +316,14 @@ export default defineContentScript({
     const refreshFields = async () => {
       const ui = current?.ui;
       if (!ui || stopped) return;
-      const next = await bridge.call('fields', null).catch(() => undefined);
-      if (next && !stopped && current?.ui === ui) ui.applyFields(next);
+      const [next, controls] = await Promise.all([bridge.call('fields', null).catch(() => undefined), bridge.call('controls', null).catch(() => undefined)]);
+      if (stopped || current?.ui !== ui) return;
+      if (next) ui.applyFields(next);
+      if (controls) ui.applyControls(controls);
     };
-    const stored = await browser.storage.local.get(['themeEnabled', 'customCssEnabled', 'customCss', 'dirtyHighlightEnabled']);
+    const stored = await browser.storage.local.get(['themeEnabled', 'customCssEnabled', 'customCss', 'dirtyHighlightEnabled', 'logicalNamesEnabled']);
     dirtyHighlightEnabled = stored.dirtyHighlightEnabled !== false;
+    logicalNamesEnabled = stored.logicalNamesEnabled === true;
     let themeEnabled = Boolean(stored.themeEnabled), customCssEnabled = Boolean(stored.customCssEnabled), customCss = typeof stored.customCss === 'string' ? stored.customCss : '';
     applyTheme(themeEnabled);
     applyCustomCss(customCssEnabled, customCss);
@@ -266,9 +341,9 @@ export default defineContentScript({
         if (hadRecord) await browser.runtime.sendMessage({ type: 'CLEAR_CONTEXT' } satisfies ToolMessage).catch(() => undefined);
         return;
       }
-      const fields = await bridge.call('fields', null).catch(() => []);
+      const [fields, controls] = await Promise.all([bridge.call('fields', null).catch(() => []), bridge.call('controls', null).catch(() => [])]);
       if (stopped) return;
-      current?.ui?.cleanup(); current = { key, context, ui: installUi(context, fields, bridge) };
+      current?.ui?.cleanup(); current = { key, context, ui: window === window.top ? installUi(fields, controls, bridge) : undefined };
       // Controls of lazily rendered tabs and headers register after the first read, so read the fields again a few times.
       retryTimers.splice(0).forEach(clearTimeout);
       for (const delay of [1500, 4000, 10000]) retryTimers.push(window.setTimeout(() => void refreshFields(), delay));
@@ -311,7 +386,7 @@ export default defineContentScript({
       if (message.type === 'TOGGLE_THEME') { themeEnabled = message.enabled; applyTheme(themeEnabled); return true; }
       return NOT_HANDLED;
     });
-    const onStorageChanged = (changes: Record<string, Browser.storage.StorageChange>, area: string) => { if (area !== 'local') return; if (changes.themeEnabled) { themeEnabled = Boolean(changes.themeEnabled.newValue); applyTheme(themeEnabled); } if (changes.dirtyHighlightEnabled) { dirtyHighlightEnabled = changes.dirtyHighlightEnabled.newValue !== false; current?.ui?.refreshMarks(); } if (changes.customCssEnabled) customCssEnabled = Boolean(changes.customCssEnabled.newValue); if (changes.customCss) customCss = typeof changes.customCss.newValue === 'string' ? changes.customCss.newValue : ''; if (changes.customCssEnabled || changes.customCss) applyCustomCss(customCssEnabled, customCss); };
+    const onStorageChanged = (changes: Record<string, Browser.storage.StorageChange>, area: string) => { if (area !== 'local') return; if (changes.themeEnabled) { themeEnabled = Boolean(changes.themeEnabled.newValue); applyTheme(themeEnabled); } if (changes.dirtyHighlightEnabled) { dirtyHighlightEnabled = changes.dirtyHighlightEnabled.newValue !== false; current?.ui?.refreshMarks(); } if (changes.logicalNamesEnabled) { logicalNamesEnabled = changes.logicalNamesEnabled.newValue === true; current?.ui?.refreshNames(); } if (changes.customCssEnabled) customCssEnabled = Boolean(changes.customCssEnabled.newValue); if (changes.customCss) customCss = typeof changes.customCss.newValue === 'string' ? changes.customCss.newValue : ''; if (changes.customCssEnabled || changes.customCss) applyCustomCss(customCssEnabled, customCss); };
     const cleanup = () => { if (stopped) return; stopped = true; if (navigationTimer !== undefined) clearInterval(navigationTimer); retryTimers.splice(0).forEach(clearTimeout); window.removeEventListener('message', onPageEvent); window.removeEventListener('message', onPerformance); window.removeEventListener('pagehide', cleanup); browser.runtime.onMessage.removeListener(onRuntimeMessage); browser.storage.onChanged.removeListener(onStorageChanged); current?.ui?.cleanup(); document.querySelector(`style#${THEME_STYLE_ID}`)?.remove(); document.querySelector(`style#${CUSTOM_STYLE_ID}`)?.remove(); bridge.teardown(); };
     ctx.onInvalidated(cleanup); window.addEventListener('message', onPageEvent); window.addEventListener('message', onPerformance); window.addEventListener('pagehide', cleanup, { once: true }); browser.runtime.onMessage.addListener(onRuntimeMessage); browser.storage.onChanged.addListener(onStorageChanged);
     try { await bridge.handshake(); } catch { cleanup(); return; }
