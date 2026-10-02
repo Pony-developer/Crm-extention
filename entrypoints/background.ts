@@ -1,4 +1,5 @@
 import type { CrmContext, FrameRegistration, PerformanceSnapshot, ToolMessage } from '../shared/types';
+import { NOT_HANDLED, createMessageListener, sendRuntimeMessage, sendTabMessage } from '../shared/messaging';
 
 interface CachedContext extends FrameRegistration {
   frameId: number;
@@ -75,7 +76,7 @@ export default defineBackground(() => {
 
     // A session entry can outlive a frame navigation. Do not restore it until
     // the exact frame proves that it still hosts a record bridge.
-    const context = await browser.tabs.sendMessage(
+    const context = await sendTabMessage<CrmContext | undefined>(
       tabId,
       { type: 'GET_CONTEXT' } satisfies ToolMessage,
       { frameId: restored.frameId },
@@ -91,14 +92,34 @@ export default defineBackground(() => {
     return verified;
   }
 
-  browser.runtime.onMessage.addListener((message: ToolMessage, sender) => {
+  async function activeTab() {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    return tab;
+  }
+
+  async function openPalette() {
+    const tab = await activeTab();
+    if (tab?.id == null) return false;
+    const target = await targetFor(tab.id);
+    // Without a verified record frame (for example after the worker restarted) ask every frame instead;
+    // frames that do not host a record form stay silent, so only the right one answers.
+    const opened = await sendTabMessage<boolean>(tab.id, { type: 'OPEN_PALETTE' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined).catch(() => false);
+    return opened === true;
+  }
+
+  function notifyContextChanged(tabId: number, context?: CrmContext) {
+    // The side panel may be closed; nobody listening is not an error.
+    void sendRuntimeMessage({ type: 'ACTIVE_CONTEXT_CHANGED', tabId, context } satisfies ToolMessage).catch(() => undefined);
+  }
+
+  browser.runtime.onMessage.addListener(createMessageListener((message, sender) => {
     if (message.type === 'REGISTER_CONTEXT' && sender.tab?.id != null) {
       if (!isRecordContext(message.context)
         || message.frame.role !== 'record'
         || !Number.isFinite(message.frame.quality) || message.frame.quality < 0
         || !Number.isFinite(message.frame.timestamp) || message.frame.timestamp < 0
         || message.frame.timestamp > Date.now() + 60_000) {
-        return Promise.resolve({ ok: false });
+        return { ok: false };
       }
       const tabId = sender.tab.id;
       // frameId comes exclusively from the browser sender metadata. It is not
@@ -112,24 +133,38 @@ export default defineBackground(() => {
           && (current.frameId === incoming.frameId || quality(incoming) > quality(current)))) {
         contexts.set(tabId, incoming);
         void rememberTarget(tabId, incoming);
+        notifyContextChanged(tabId, incoming.context);
       }
-      return Promise.resolve({ ok: true });
+      return { ok: true };
+    }
+    if (message.type === 'CLEAR_CONTEXT' && sender.tab?.id != null) {
+      // The record frame left its form, for example by in-app navigation to a grid.
+      const tabId = sender.tab.id;
+      const current = contexts.get(tabId);
+      if (current && current.frameId === (sender.frameId ?? 0)) {
+        return forgetTarget(tabId).then(() => { notifyContextChanged(tabId); return { ok: true }; });
+      }
+      return { ok: true };
     }
     if (message.type === 'REGISTER_PERFORMANCE' && sender.tab?.id != null) {
       performance.set(sender.tab.id, message.snapshot);
-      void browser.runtime.sendMessage({ type: 'REGISTER_PERFORMANCE', snapshot: message.snapshot } satisfies ToolMessage).catch(() => undefined);
-      return Promise.resolve({ ok: true });
+      void sendRuntimeMessage({ type: 'REGISTER_PERFORMANCE', snapshot: message.snapshot } satisfies ToolMessage).catch(() => undefined);
+      return { ok: true };
     }
     if (message.type === 'GET_ACTIVE_CONTEXT') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+      return activeTab().then(async tab => {
         if (tab?.id == null) return undefined;
         const target = await targetFor(tab.id);
-        return browser.tabs.sendMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined)
+        return sendTabMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined)
           .catch(() => undefined);
       });
     }
+    if (message.type === 'OPEN_PALETTE' && sender.tab?.id == null) {
+      // Sent by the side panel; content scripts only ever receive this message.
+      return openPalette();
+    }
     if (message.type === 'CAPTURE_VISIBLE_TAB') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      return activeTab().then(tab => {
         if (tab?.windowId == null) throw new Error('No active tab to capture');
         return browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       });
@@ -141,7 +176,7 @@ export default defineBackground(() => {
         if (!tab.active || tab.id == null) throw new Error('The active Dynamics tab changed. Reopen the Toolkit before running this request.');
         const target = await targetFor(tab.id);
         if (!target) throw new Error('Dynamics bridge is not connected to the selected tab');
-        const context = await browser.tabs.sendMessage(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, { frameId: target.frameId }).catch(() => undefined);
+        const context = await sendTabMessage<CrmContext | undefined>(tab.id, { type: 'GET_CONTEXT' } satisfies ToolMessage, { frameId: target.frameId }).catch(() => undefined);
         if (!isRecordContext(context)
           || context.orgUrl !== message.expectedContext.orgUrl
           || context.entityName !== message.expectedContext.entityName
@@ -151,7 +186,7 @@ export default defineBackground(() => {
         if (cancelledBeforeDispatch.has(requestId)) throw new Error('Request cancelled.');
         const route = { tabId: tab.id, frameId: target.frameId };
         requestRoutes.set(requestId, route);
-        return browser.tabs.sendMessage(tab.id, message, { frameId: target.frameId });
+        return sendTabMessage(tab.id, message, { frameId: target.frameId });
       }).finally(() => {
         pendingRequests.delete(requestId);
         cancelledBeforeDispatch.delete(requestId);
@@ -160,32 +195,33 @@ export default defineBackground(() => {
     }
     if (message.type === 'CANCEL_REQUEST') {
       const route = requestRoutes.get(message.requestId);
-      if (route) return browser.tabs.sendMessage(route.tabId, message, { frameId: route.frameId }).catch(() => false);
+      if (route) return sendTabMessage(route.tabId, message, { frameId: route.frameId }).catch(() => false);
       if (pendingRequests.has(message.requestId)) {
         cancelledBeforeDispatch.add(message.requestId);
-        return Promise.resolve(true);
+        return true;
       }
-      return Promise.resolve(false);
+      return false;
     }
     if (message.type === 'GET_RELATIONSHIPS' || message.type === 'OPEN_COMPONENT') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+      return activeTab().then(async tab => {
         if (tab?.id == null) throw new Error('No active Dynamics tab');
         const target = await targetFor(tab.id);
         if (!target) throw new Error('Dynamics bridge is not connected to the active tab');
-        return browser.tabs.sendMessage(tab.id, message, { frameId: target.frameId });
+        return sendTabMessage(tab.id, message, { frameId: target.frameId });
       });
     }
     if (message.type === 'GET_ACTIVE_PERFORMANCE') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id != null ? performance.get(tab.id) : undefined);
+      return activeTab().then(tab => tab?.id != null ? performance.get(tab.id) : undefined);
     }
     if (message.type === 'SET_THEME') {
-      return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+      return activeTab().then(async tab => {
         if (tab?.id == null) return;
         const target = await targetFor(tab.id);
-        return browser.tabs.sendMessage(tab.id, { type: 'TOGGLE_THEME', enabled: message.enabled } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined);
+        return sendTabMessage(tab.id, { type: 'TOGGLE_THEME', enabled: message.enabled } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined);
       });
     }
-  });
+    return NOT_HANDLED;
+  }));
 
   browser.tabs.onRemoved.addListener(tabId => {
     performance.delete(tabId);
@@ -195,11 +231,6 @@ export default defineBackground(() => {
     if (tab.windowId) await browser.sidePanel.open({ windowId: tab.windowId });
   });
   browser.commands.onCommand.addListener(async (command) => {
-    if (command !== 'open-command-palette') return;
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      const target = await targetFor(tab.id);
-      await browser.tabs.sendMessage(tab.id, { type: 'OPEN_PALETTE' } satisfies ToolMessage, target ? { frameId: target.frameId } : undefined).catch(() => undefined);
-    }
+    if (command === 'open-command-palette') await openPalette();
   });
 });

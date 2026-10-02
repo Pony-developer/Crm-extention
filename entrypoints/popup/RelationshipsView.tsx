@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, Database, ExternalLink, RefreshCw, Search } from 'lucide-react';
 import type { CrmContext, RelationshipsResult, ToolMessage } from '../../shared/types';
+import { sendRuntimeMessage } from '../../shared/messaging';
 
 type Kind = '1:N' | 'N:1' | 'N:N';
 export type Relationship = { id: string; schemaName: string; kind: Kind; direction: 'outgoing' | 'incoming' | 'bidirectional'; referencedEntity: string; referencingEntity: string; relatedEntity: string };
@@ -17,7 +18,7 @@ async function loadRelationships(orgUrl: string, entity: string, force = false):
     const stored = (await browser.storage.local.get(key))[key] as CacheEntry | undefined;
     if (stored && Date.now() - stored.savedAt < CACHE_TTL) return stored.relationships;
   }
-  const result = await browser.runtime.sendMessage({ type: 'GET_RELATIONSHIPS', request: { logicalName: entity } } satisfies ToolMessage) as RelationshipsResult;
+  const result = await sendRuntimeMessage({ type: 'GET_RELATIONSHIPS', request: { logicalName: entity } } satisfies ToolMessage) as RelationshipsResult;
   if (!result?.ok) {
     const error = result?.error ?? { message: 'Dynamics did not return relationship metadata. Verify that the active tab belongs to this organization.' };
     if (error.status === 401 || error.status === 403) throw new Error(`Insufficient privileges (${error.status}). Read EntityDefinition and relationship metadata privileges are required.`);

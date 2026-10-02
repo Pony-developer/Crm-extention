@@ -2,7 +2,8 @@ export type ToolMessage =
   | { type: 'GET_CONTEXT' }
   | { type: 'REGISTER_CONTEXT'; context: CrmContext; frame: FrameRegistration }
   | { type: 'REGISTER_PERFORMANCE'; snapshot: PerformanceSnapshot }
-  | { type: 'ACTIVE_CONTEXT_CHANGED'; context: CrmContext }
+  | { type: 'CLEAR_CONTEXT' }
+  | { type: 'ACTIVE_CONTEXT_CHANGED'; tabId: number; context?: CrmContext }
   | { type: 'GET_ACTIVE_CONTEXT' }
   | { type: 'GET_ACTIVE_PERFORMANCE' }
   | { type: 'RUN_REQUEST'; request: WebApiRequest; targetTabId: number; expectedContext: RequestContext }

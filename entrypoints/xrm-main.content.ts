@@ -89,6 +89,13 @@ export default defineContentScript({
       const onSave = () => window.setTimeout(() => publishAll('save-complete'), 750); const onPostSave = () => publishAll('save-complete'); const onLoad = () => publishAll('form-load');
       entity.addOnSave?.(onSave); entity.addOnPostSave?.(onPostSave); page.data?.addOnLoad?.(onLoad);
       removers.push(() => entity.removeOnSave?.(onSave), () => entity.removeOnPostSave?.(onPostSave), () => page.data?.removeOnLoad?.(onLoad));
+      // OnChange only fires for edits made in the UI. Scripts that call setValue() without fireOnChange, and
+      // attributes added later, still flip the dirty flag, so compare the flags periodically and publish differences.
+      let lastDirty = '';
+      const dirtySignature = () => { const dirty: string[] = []; entity.attributes?.forEach((attribute: any) => { if (attribute.getIsDirty?.()) dirty.push(attribute.getName()); }); return dirty.sort().join('|'); };
+      lastDirty = dirtySignature();
+      const dirtyTimer = window.setInterval(() => { const signature = dirtySignature(); if (signature !== lastDirty) { lastDirty = signature; publishAll('dirty-poll'); } }, 700);
+      removers.push(() => window.clearInterval(dirtyTimer));
       unsubscribe = () => { removers.splice(0).forEach(remove => remove()); subscriptionKey = ''; };
     }
     async function getMetadata(orgUrl: string, logicalName: string) {
@@ -222,7 +229,7 @@ export default defineContentScript({
           for (const header of payload.headers ?? []) if (header.name.trim()) headers.set(header.name.trim(), header.value);
           if (['POST', 'PATCH', 'PUT'].includes(method) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json; charset=utf-8');
           try {
-            const response = await fetch(requestUrl, { method, headers, body, signal: controller.signal });
+            const response = await fetch(requestUrl.href, { method, headers, body, signal: controller.signal });
             const result = { status: response.status, statusText: response.statusText, body: await response.text() };
             return post({ channel: CHANNEL, direction: 'response', id, action, token: sessionToken, result });
           } finally {

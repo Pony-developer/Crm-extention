@@ -1,9 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Camera, ChevronLeft, Copy, Download, EyeOff, Plus, Square, Trash2, Undo2 } from 'lucide-react';
 import type { Annotation, CrmContext, RecordedStep, ToolMessage } from '../../shared/types';
+import { sendRuntimeMessage } from '../../shared/messaging';
 
 type Tool = Annotation['kind'];
 const STORAGE_KEY = 'reproRecorderSteps';
+const SHOT_PREFIX = 'reproRecorderShot:';
+const shotKey = (id: string) => `${SHOT_PREFIX}${id}`;
 
 export function Recorder({ context, onClose }: { context: CrmContext; onClose: () => void }) {
   const [steps, setSteps] = useState<RecordedStep[]>([]);
@@ -16,15 +19,41 @@ export function Recorder({ context, onClose }: { context: CrmContext; onClose: (
   const draft = useRef<{ x: number; y: number } | undefined>(undefined);
   const step = steps[selected];
 
+  // Screenshots live under their own keys: the steps array stays small, so editing a
+  // description never rewrites megabytes of PNG data. Maps step id -> stored screenshot.
+  const savedShots = useRef(new Map<string, string>());
   useEffect(() => {
-    void browser.storage.local.get(STORAGE_KEY).then(v => {
-      setSteps((v[STORAGE_KEY] as RecordedStep[]) || []);
+    void (async () => {
+      const stored = ((await browser.storage.local.get(STORAGE_KEY))[STORAGE_KEY] as RecordedStep[] | undefined) || [];
+      const shots = await browser.storage.local.get(stored.map(item => shotKey(item.id)));
+      const loaded = stored.map(item => {
+        const separate = shots[shotKey(item.id)] as string | undefined;
+        if (separate) savedShots.current.set(item.id, separate);
+        // Steps saved by earlier versions embed the screenshot; the next save moves it.
+        const screenshot = separate ?? item.screenshot;
+        return screenshot ? { ...item, screenshot } : item;
+      });
+      setSteps(loaded);
       setStepsLoaded(true);
-    }).catch(error => setNotice(`Не удалось загрузить шаги: ${String(error)}`));
+    })().catch(error => setNotice(`Не удалось загрузить шаги: ${String(error)}`));
   }, []);
   useEffect(() => {
     if (!stepsLoaded) return;
-    void browser.storage.local.set({ [STORAGE_KEY]: steps }).catch(error => setNotice(`Не удалось сохранить шаги: ${String(error)}`));
+    const changed: Record<string, string> = {};
+    const live = new Set<string>();
+    for (const item of steps) {
+      if (!item.screenshot) continue;
+      live.add(item.id);
+      if (savedShots.current.get(item.id) !== item.screenshot) changed[shotKey(item.id)] = item.screenshot;
+    }
+    const stale = [...savedShots.current.keys()].filter(id => !live.has(id));
+    const metadata = steps.map(({ screenshot: _screenshot, ...item }) => item);
+    void (async () => {
+      await browser.storage.local.set({ ...changed, [STORAGE_KEY]: metadata });
+      if (stale.length) await browser.storage.local.remove(stale.map(shotKey));
+      for (const key of Object.keys(changed)) savedShots.current.set(key.slice(SHOT_PREFIX.length), changed[key]!);
+      stale.forEach(id => savedShots.current.delete(id));
+    })().catch(error => setNotice(`Не удалось сохранить шаги: ${String(error)}`));
   }, [steps, stepsLoaded]);
   useEffect(() => {
     const el = canvas.current;
@@ -45,12 +74,12 @@ export function Recorder({ context, onClose }: { context: CrmContext; onClose: (
   }, [step]);
 
   const add = async () => {
-    const current = await browser.runtime.sendMessage({ type: 'GET_ACTIVE_CONTEXT' } satisfies ToolMessage).catch(() => context) as CrmContext || context;
+    const current = await sendRuntimeMessage({ type: 'GET_ACTIVE_CONTEXT' } satisfies ToolMessage).catch(() => context) as CrmContext || context;
     const next: RecordedStep = { id: crypto.randomUUID(), description: '', timestamp: new Date().toISOString(), context: { pageUrl: current.pageUrl, orgName: current.orgName, entityName: current.entityName, recordId: current.recordId, formName: current.formName }, annotations: [] };
     setSteps(old => [...old, next]); setSelected(steps.length);
   };
   const update = (change: Partial<RecordedStep>) => setSteps(old => old.map((item, i) => i === selected ? { ...item, ...change } : item));
-  const capture = async () => { try { const screenshot = await browser.runtime.sendMessage({ type: 'CAPTURE_VISIBLE_TAB' } satisfies ToolMessage); update({ screenshot }); } catch (e) { setNotice(`Не удалось сделать снимок: ${String(e)}`); } };
+  const capture = async () => { try { const screenshot = await sendRuntimeMessage<string>({ type: 'CAPTURE_VISIBLE_TAB' } satisfies ToolMessage); update({ screenshot }); } catch (e) { setNotice(`Не удалось сделать снимок: ${String(e)}`); } };
   const point = (event: React.PointerEvent<HTMLCanvasElement>) => { const r = event.currentTarget.getBoundingClientRect(); return { x: (event.clientX-r.left)*event.currentTarget.width/r.width, y: (event.clientY-r.top)*event.currentTarget.height/r.height }; };
   const endDraw = (event: React.PointerEvent<HTMLCanvasElement>) => { if (!draft.current || !step) return; const p=point(event); update({ annotations: [...step.annotations, { id: crypto.randomUUID(), kind: tool, x1:draft.current.x, y1:draft.current.y, x2:p.x, y2:p.y }] }); draft.current=undefined; };
   const move = (from:number, to:number) => { if(to<0||to>=steps.length)return; const copy=[...steps], item=copy[from];if(!item)return;copy.splice(from,1);copy.splice(to,0,item);setSteps(copy);setSelected(to); };
